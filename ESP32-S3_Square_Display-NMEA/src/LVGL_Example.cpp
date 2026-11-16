@@ -169,7 +169,9 @@ static void led_event_cb(lv_event_t *e) {
  
     if (lv_obj_get_state(sw) & LV_STATE_CHECKED) {
       lv_led_on(led);
-      if (is_board_v4()) {
+      if (is_board_4b()) {
+        // 4B: no buzzer
+      } else if (is_board_v4()) {
         Mode_EXIO(PIN_BEE_EN, 0);  // V4: EXIO6 as output
         Set_EXIO(PIN_BEE_EN, High);
       } else {
@@ -178,7 +180,9 @@ static void led_event_cb(lv_event_t *e) {
     } 
     else {
       lv_led_off(led);
-      if (is_board_v4()) {
+      if (is_board_4b()) {
+        // 4B: no buzzer
+      } else if (is_board_v4()) {
         Set_EXIO(PIN_BEE_EN, Low);
         Mode_EXIO(PIN_BEE_EN, 1);  // V4: back to input (safe)
       } else {

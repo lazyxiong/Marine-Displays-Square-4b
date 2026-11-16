@@ -243,7 +243,43 @@ static bool GT911_Upload_Config(void) {
     return false;
 }
 
+// ESP32-S3-Touch-LCD-4B: RST = EXIO5, INT = EXIO6 (both on the TCA9554).
+// Hold INT LOW while releasing RST so the GT911 latches address 0x5D, then
+// make INT an input again (the GT911 drives it afterwards; we poll anyway).
+static void GT911_4B_Reset(void)
+{
+  printf("[TOUCH] 4B: resetting GT911 via TCA9554 (EXIO5=RST, EXIO6=INT)\n");
+  Mode_EXIO(B4_PIN_TP_INT, 0);           // INT as output
+  Set_EXIO(B4_PIN_TP_INT, Low);
+  Mode_EXIO(B4_PIN_TP_RST, 0);
+  Set_EXIO(B4_PIN_TP_RST, Low);
+  vTaskDelay(pdMS_TO_TICKS(20));
+  Set_EXIO(B4_PIN_TP_RST, High);         // GT911 samples INT=LOW -> 0x5D
+  vTaskDelay(pdMS_TO_TICKS(10));
+  Mode_EXIO(B4_PIN_TP_INT, 1);           // release INT
+  vTaskDelay(pdMS_TO_TICKS(100));        // GT911 boot
+}
+
 uint8_t Touch_Init(void) {
+
+  if (is_board_4b()) {
+    GT911_4B_Reset();
+    if (!GT911_ProbeAndSelect(true)) {
+      gt911_addr = GT911_ADDR_PRIMARY;
+      printf("[TOUCH] 4B: GT911 not found, defaulting to 0x%02X\n", gt911_addr);
+    }
+    GT911_Read_cfg();
+    {
+      uint8_t id[3] = {0};
+      bool ok = GT911_ReadProductIdAt(gt911_addr, id);
+      Serial.printf("[TOUCH] 4B: GT911 %s at 0x%02X (id=%c%c%c)\n",
+                    ok ? "FOUND" : "NOT RESPONDING", gt911_addr,
+                    ok ? id[0] : '?', ok ? id[1] : '?', ok ? id[2] : '?');
+    }
+    uint8_t clear = 0;
+    I2C_Write_Touch(gt911_addr, ESP_LCD_TOUCH_GT911_READ_XY_REG, &clear, 1);
+    return true;   // polling only — no interrupt GPIO on the 4B
+  }
 
   // V4: Waveshare example does NO reset — just keeps TP_RST HIGH via
   // CH32V003 output register (already set in setup()).  Only V3 needs

@@ -16,8 +16,20 @@ static bool g_board_v4 = false;
 static uint8_t ch32v003_dir_shadow = CH32V003_DIR_ALL_OUT;  // 0xFF
 static uint8_t ch32v003_out_shadow = CH32V003_OUT_NORMAL;   // 0x3A
 
+bool board_has_pwm_backlight()
+{
+  return g_board_v4 || is_board_4b();
+}
+
 bool detect_expander_address()
 {
+  if (is_board_4b()) {
+    // ESP32-S3-Touch-LCD-4B: TCA9554 at 0x20, fixed at compile time.
+    g_tca9554_address = TCA9554_ADDR_V3;
+    g_board_v4 = false;
+    ets_printf("[BOARD] ESP32-S3-Touch-LCD-4B (TCA9554 0x20, compile-time)\r\n");
+    return true;
+  }
   // Check NVS for a cached board version from a previous successful probe.
   // If found, skip I2C probing (which can leave the expander in a bad state
   // on v4 boards and crash the display).
@@ -104,9 +116,9 @@ uint8_t exio_input_reg()
 }
 
 // Functional pin aliases — V4 pins shifted +1 vs V3 (CH32V003 added EXIO0/charger at bit0)
-uint8_t pin_tp_rst()  { return g_board_v4 ? 2 : 1; }  // V3:IO0/bit0, V4:EXIO1/bit1
-uint8_t pin_lcd_rst() { return g_board_v4 ? 4 : 3; }  // V3:IO2/bit2, V4:EXIO3/bit3
-uint8_t pin_sdcs()    { return g_board_v4 ? 5 : 4; }  // V3:IO3/bit3, V4:EXIO4/bit4
+uint8_t pin_tp_rst()  { return is_board_4b() ? B4_PIN_TP_RST  : (g_board_v4 ? 2 : 1); }  // V3:IO0/bit0, V4:EXIO1/bit1, 4B:EXIO5
+uint8_t pin_lcd_rst() { return is_board_4b() ? B4_PIN_LCD_RST : (g_board_v4 ? 4 : 3); }  // V3:IO2/bit2, V4:EXIO3/bit3, 4B:EXIO7
+uint8_t pin_sdcs()    { return is_board_4b() ? 0              : (g_board_v4 ? 5 : 4); }  // V3:IO3/bit3, V4:EXIO4/bit4, 4B: no SD
 
 /*****************************************************  Operation register REG   ****************************************************/   
 // Safe I2C read — returns false on failure, leaving *out unchanged.

@@ -237,6 +237,15 @@ void Lvgl_Touchpad_Read( lv_indev_drv_t * indev_drv, lv_indev_data_t * data )
   Touch_Read_Data();
   uint8_t touchpad_pressed = Touch_Get_XY(touchpad_x, touchpad_y, strength, &touchpad_cnt, GT911_LCD_TOUCH_MAX_POINTS);
 
+#if defined(BOARD_WAVESHARE_4B)
+  {
+    static bool was_pressed = false;
+    bool now_pressed = (touchpad_pressed && touchpad_cnt > 0);
+    if (now_pressed && !was_pressed)
+      Serial.printf("[TOUCH] press x=%u y=%u\n", touchpad_x[0], touchpad_y[0]);
+    was_pressed = now_pressed;
+  }
+#endif
   if (touchpad_pressed && touchpad_cnt > 0) {
     // Always update activity timestamp on any touch
     g_last_activity_ms = millis();

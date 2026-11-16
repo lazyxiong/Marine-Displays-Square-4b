@@ -1,8 +1,13 @@
 #pragma once
 #include <Wire.h> 
 
+#if defined(BOARD_WAVESHARE_4B)
+#define I2C_SCL_PIN       48
+#define I2C_SDA_PIN       47
+#else
 #define I2C_SCL_PIN       7
 #define I2C_SDA_PIN       15
+#endif
 
 
 void I2C_Init(void);

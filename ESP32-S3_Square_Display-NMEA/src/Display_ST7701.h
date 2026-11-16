@@ -19,14 +19,24 @@
 // Disable runtime panel tests/diagnostics when set to 1
 #define REMOVE_PANEL_TESTS 1
 
+#if defined(BOARD_WAVESHARE_4B)
+// 4B: ST7701 3-wire SPI (CS/SDA/SCK) is on TCA9554 EXIO0/1/2 — no MCU pins.
+// GPIO1/2 are RGB data (B4/B3) on this board.
+#define LCD_CLK_PIN   -1
+#define LCD_MOSI_PIN  -1
+#define LCD_Backlight_PIN   4  // GPIO4 -> AP3032 boost driver CTRL (PWM dimming)
+#define LCD_CS_PIN     -1
+#define Frequency       5000    // PWM frequency for AP3032 CTRL
+#else
 #define LCD_CLK_PIN   2
 #define LCD_MOSI_PIN  1 
 #define LCD_Backlight_PIN   -1 // Use expander BL_EN (EXIO_PIN2) only; MCU PWM disabled
 // If your board uses a GPIO for LCD CS set it here, otherwise -1 to use expander
 #define LCD_CS_PIN     42
+#define Frequency       20000   // PWM frequencyconst        
+#endif
 // Backlight   ledChannel：PWM Channe 
 #define PWM_Channel     1       // PWM Channel   
-#define Frequency       20000   // PWM frequencyconst        
 #define Resolution      10       // PWM resolution ratio     MAX:13
 #define Dutyfactor      500     // PWM Dutyfactor      
 #define Backlight_MAX   100      

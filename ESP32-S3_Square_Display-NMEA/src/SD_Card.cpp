@@ -48,10 +48,12 @@ static void make_vfs_path(const char* in, char* out, size_t outlen) {
 }
 
 void SD_D3_Dis(){
+  if (is_board_4b()) return;   // 4B: no SD slot (EXIO3 there is the audio amp)
   Set_EXIO(pin_sdcs(),Low);    // SD CS: V3=pin4(IO3), V4=pin5(EXIO4)
   vTaskDelay(pdMS_TO_TICKS(10));
 }
 void SD_D3_EN(){
+  if (is_board_4b()) return;   // 4B: no SD slot (EXIO3 there is the audio amp)
   Set_EXIO(pin_sdcs(),High);   // SD CS: V3=pin4(IO3), V4=pin5(EXIO4)
   vTaskDelay(pdMS_TO_TICKS(10));
 }
@@ -59,6 +61,14 @@ esp_err_t SD_Init() {
   // SD initialization: follow the Arduino demo's SD_MMC flow exactly.
   SDCard_Flag = false;
   SDCard_Finish = false;
+
+  if (is_board_4b()) {
+    // ESP32-S3-Touch-LCD-4B has no microSD slot, and GPIO1/2/4 are RGB data /
+    // backlight pins there — never start SDMMC on them.
+    printf("SD_Init: 4B board has no SD slot, skipping\n");
+    SDCard_Finish = true;
+    return ESP_ERR_NOT_SUPPORTED;
+  }
 
   printf("SD_Init: Arduino-demo SD_MMC begin sequence\n");
 

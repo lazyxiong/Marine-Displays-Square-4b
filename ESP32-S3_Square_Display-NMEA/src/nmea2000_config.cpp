@@ -977,6 +977,7 @@ static void n2k_task(void* param) {
 // ── Public API ───────────────────────────────────────────────────────
 void enable_nmea2000() {
     if (n2k_running) return;
+    if (CAN_TX_PIN < 0 || CAN_RX_PIN < 0) return;   // board without CAN pins (e.g. 4B)
 
     init_sensor_mutex();
 

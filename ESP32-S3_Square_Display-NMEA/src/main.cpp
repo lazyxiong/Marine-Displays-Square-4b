@@ -990,7 +990,13 @@ void setup() {
     // Detect board version (v3=0x20, v4=0x24) before any expander operations
     detect_expander_address();
 
-    if (is_board_v4()) {
+    if (is_board_4b()) {
+      // ESP32-S3-Touch-LCD-4B (TCA9554 @0x20): latch safe levels first, then
+      // directions. Amp (EXIO3) OFF, LCD/touch resets released, LCD SPI idle high.
+      I2C_Write_EXIO(TCA9554_Polarity_REG, 0x00);
+      Set_EXIOS(B4_OUT_IDLE);
+      TCA9554PWR_Init(B4_DIR_NORMAL);
+    } else if (is_board_v4()) {
       // V4 (CH32V003): Write OUTPUT before DIR to prevent buzzer glitch.
       // CH32V003 powers on with output latch=0xFF (all HIGH). Writing DIR=0xFF
       // first would momentarily drive BEE_EN HIGH (buzzer on) before OUTPUT=0x3A
@@ -1020,7 +1026,8 @@ void setup() {
       Set_EXIOS(0xDF);             // bit5=0 (PIN6 LOW on V3)
       TCA9554PWR_Init(0x00);       // CONFIG = all outputs
     }
-    ets_printf("*** IO expander configured (board %s) ***\r\n", is_board_v4() ? "v4" : "v3");
+    ets_printf("*** IO expander configured (board %s) ***\r\n",
+               is_board_4b() ? "4B" : (is_board_v4() ? "v4" : "v3"));
 
     // Serial for debugging - with timeout
     Serial.setTxTimeoutMs(0);  // Non-blocking serial
@@ -1033,7 +1040,7 @@ void setup() {
     Serial.flush();
     
     // I2C and IO expander already initialized above; re-assert safe state after delay
-    if (!is_board_v4()) {
+    if (!is_board_v4() && !is_board_4b()) {
       Set_EXIO(EXIO_PIN6, Low);    // V3: re-assert PIN6 LOW
     }
     ets_printf("*** I2C+expander done ***\r\n");
@@ -1046,7 +1053,8 @@ void setup() {
     Serial.flush();
     
     // Shared SPI bus initialization (used by ST7701 command SPI and SDSPI)
-    {
+    // Not on the 4B: no SD slot, LCD SPI is on the expander, GPIO1/2 are RGB data.
+    if (!is_board_4b()) {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num = LCD_MOSI_PIN;
         buscfg.miso_io_num = SD_D0_PIN; // SD data0 / MISO
@@ -1079,7 +1087,9 @@ void setup() {
     // Initialize the display
     LCD_Init();
     // Re-assert safe IO expander state after LCD_Init (which may have modified registers)
-    if (is_board_v4()) {
+    if (is_board_4b()) {
+      Set_EXIO(B4_PIN_AMP_EN, Low);   // 4B: keep audio amp off
+    } else if (is_board_v4()) {
       // V4: re-assert Waveshare-matching CH32V003 state after LCD_Init
       I2C_Write_EXIO(CH32V003_DIR_REG, CH32V003_DIR_ALL_OUT);
       I2C_Write_EXIO(CH32V003_OUTPUT_REG, CH32V003_OUT_NORMAL);
@@ -1211,9 +1221,13 @@ void setup() {
     Serial.flush();
 
     // Start NMEA 2000 CAN bus listener
+#if (CAN_TX_PIN >= 0) && (CAN_RX_PIN >= 0)
     Serial.println("Starting NMEA 2000...");
     Serial.flush();
     enable_nmea2000();
+#else
+    Serial.println("NMEA 2000 disabled: no CAN pins for this board (set CAN_TX_PIN/CAN_RX_PIN)");
+#endif
     
     Serial.println("Display initialized with WiFi optimizations.");
     Serial.print("WiFi SSID: ");
@@ -1686,7 +1700,9 @@ void loop() {
     {
         static unsigned long last_buz_maintain = 0;
         unsigned long now_m = millis();
-        if (is_board_v4()) {
+        if (is_board_4b()) {
+            // 4B: no buzzer (speaker amp is held off at boot)
+        } else if (is_board_v4()) {
             // V4: unconditional write every 30 s (skip first 3 s to avoid startup beep)
             if (now_m > 3000 && (now_m - last_buz_maintain >= 30000)) {
                 last_buz_maintain = now_m;

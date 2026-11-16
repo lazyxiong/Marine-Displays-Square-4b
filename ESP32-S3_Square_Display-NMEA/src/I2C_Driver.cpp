@@ -7,8 +7,8 @@ void I2C_Init(void) {
   // then a STOP condition to return the bus to idle.  This is harmless when the
   // bus is already idle (SDA HIGH) — the check exits immediately.
   {
-    const int SDA = I2C_SDA_PIN;  // GPIO15
-    const int SCL = I2C_SCL_PIN;  // GPIO7
+    const int SDA = I2C_SDA_PIN;  // GPIO15 (4B: GPIO47)
+    const int SCL = I2C_SCL_PIN;  // GPIO7  (4B: GPIO48)
     pinMode(SCL, OUTPUT);
     digitalWrite(SCL, HIGH);
     pinMode(SDA, INPUT_PULLUP);

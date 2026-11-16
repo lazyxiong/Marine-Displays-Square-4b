@@ -10,7 +10,13 @@
 #define GT911_ADDR_SECONDARY 0x14
 extern uint8_t gt911_addr;            // set by Touch_Init() auto-detect
 #define GT911_ADDR           gt911_addr
+#if defined(BOARD_WAVESHARE_4B)
+// 4B: GT911 INT is on the TCA9554 (EXIO6), not a GPIO. GPIO16 is I2S BCLK —
+// must never be touched. Touch is polled, so no interrupt pin is needed.
+#define GT911_INT_PIN       -1
+#else
 #define GT911_INT_PIN       16
+#endif
 
 
 #define GT911_LCD_TOUCH_MAX_POINTS             (5)      

@@ -2267,7 +2267,7 @@ void handle_save_gauges() {
         // Verify SD is still mounted; attempt remount if needed.
         // Once a remount fails, skip all future attempts this boot to avoid
         // blocking the save handler with multi-hundred-ms SD init timeouts.
-        static bool sd_permanently_absent = false;
+        static bool sd_permanently_absent = is_board_4b();  // 4B: no SD slot
         bool sd_available = true;
         if (sd_permanently_absent) {
             sd_available = false;
@@ -2689,7 +2689,7 @@ void handle_device_page() {
     html += "<option value='30'" + String(screen_off_timeout_min==30?" selected":"") + ">30 min</option>";
     html += "</select></div>";
     // Brightness — V4: unified slider (10-200, with red mode below 110), V3: 4-step slider
-    if (is_board_v4()) {
+    if (board_has_pwm_backlight()) {
         html += "<div class='form-row'><label>Brightness:</label>";
         html += "<input type='range' name='brightness_lv' min='10' max='200' value='" + String(brightness_level) + "'";
         html += " oninput='var v=parseInt(this.value),s=this.nextElementSibling;";
@@ -2780,7 +2780,7 @@ void handle_save_device() {
 
         // Brightness level
         uint8_t bl = (uint8_t)config_server.arg("brightness_lv").toInt();
-        if (is_board_v4()) {
+        if (board_has_pwm_backlight()) {
             int bl_raw = config_server.arg("brightness_lv").toInt();
             if (bl_raw > 200) bl_raw = 200;
             if (bl_raw < 10) bl_raw = 10;
@@ -2923,7 +2923,9 @@ void setup_network() {
         tries++;
         // Silence buzzer during WiFi wait — setup() may have left BEE_EN/PIN6
         // HIGH if the I2C expander direction write failed after a crash-reboot.
-        if (is_board_v4()) {
+        if (is_board_4b()) {
+            // 4B: no buzzer
+        } else if (is_board_v4()) {
             uint8_t cur_dir;
             if (I2C_Read_EXIO_safe(exio_dir_reg(), &cur_dir) && cur_dir != CH32V003_DIR_SAFE) {
                 I2C_Write_EXIO(exio_dir_reg(), CH32V003_DIR_SAFE);

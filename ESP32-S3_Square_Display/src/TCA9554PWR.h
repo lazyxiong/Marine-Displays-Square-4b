@@ -68,6 +68,36 @@ extern uint8_t g_tca9554_address;                         // Detected at runtime
 #define EXIO_PIN7   7
 #define EXIO_PIN8   8
 
+/*****************************************************  ESP32-S3-Touch-LCD-4B  ****************************************************/
+// The "4B" is a different PCB from the "4" (v3/v4). It also has a TCA9554 at
+// 0x20, so it cannot be told apart from a v3 at runtime — it is selected at
+// compile time with -DBOARD_WAVESHARE_4B (env:waveshare_4b).
+// Pin numbers below are 1-indexed (Pin = EXIOn + 1) for Set_EXIO/Mode_EXIO.
+#define B4_PIN_LCD_CS    1   // EXIO0  ST7701 3-wire SPI CS
+#define B4_PIN_LCD_SDA   2   // EXIO1  ST7701 3-wire SPI data
+#define B4_PIN_LCD_SCK   3   // EXIO2  ST7701 3-wire SPI clock
+#define B4_PIN_AMP_EN    4   // EXIO3  audio amplifier enable (keep LOW)
+#define B4_PIN_EXIO4     5   // EXIO4  header / unused
+#define B4_PIN_TP_RST    6   // EXIO5  GT911 reset
+#define B4_PIN_TP_INT    7   // EXIO6  GT911 interrupt (address select at reset)
+#define B4_PIN_LCD_RST   8   // EXIO7  ST7701 reset
+#define B4_BIT(pin)      ((uint8_t)(1u << ((pin) - 1)))
+// Idle output latch: CS high, SCK high, SDA high, amp off, TP_RST high, TP_INT low, LCD_RST high
+#define B4_OUT_IDLE      (uint8_t)(B4_BIT(B4_PIN_LCD_CS) | B4_BIT(B4_PIN_LCD_SDA) | B4_BIT(B4_PIN_LCD_SCK) | \
+                                   B4_BIT(B4_PIN_TP_RST) | B4_BIT(B4_PIN_LCD_RST))
+// Direction (TCA convention 0=out, 1=in): everything out except EXIO4 and TP_INT
+#define B4_DIR_NORMAL    (uint8_t)(B4_BIT(B4_PIN_EXIO4) | B4_BIT(B4_PIN_TP_INT))
+
+#if defined(BOARD_WAVESHARE_4B)
+static inline constexpr bool is_board_4b() { return true; }
+#else
+static inline constexpr bool is_board_4b() { return false; }
+#endif
+
+// Boards whose backlight is real PWM (V4: CH32V003 PWM reg, 4B: LEDC on GPIO4)
+// and therefore use the 10-200 brightness slider instead of the V3 4-step mode.
+bool board_has_pwm_backlight();
+
 /*****************************************************  Board detection  ****************************************************/
 bool detect_expander_address();                             // Auto-detect board version (probe once, cache in NVS)
 bool is_board_v4();                                         // Returns true if v4 board detected

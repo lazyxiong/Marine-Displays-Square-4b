@@ -382,10 +382,139 @@ void ST7701_Init()
   // Log free heap after successful panel creation
 
 }
+#if defined(BOARD_WAVESHARE_4B)
+/*************************************************************************************************
+ * ESP32-S3-Touch-LCD-4B
+ *  - ST7701 3-wire SPI (9-bit, DC bit first) is bit-banged through the TCA9554:
+ *      EXIO0 = CS, EXIO1 = SDA, EXIO2 = SCK  (same as Waveshare's Arduino_XCA9554SWSPI)
+ *  - RGB565 bus pins from Waveshare's 4B pin_config.h / schematic.
+ *************************************************************************************************/
+static uint8_t s_b4_out = B4_OUT_IDLE;   // shadow of TCA9554 output latch during init
+
+static inline void b4_out_write(uint8_t v)
+{
+  s_b4_out = v;
+  I2C_Write_EXIO(TCA9554_OUTPUT_REG, v);
+}
+
+static void b4_spi_cs(bool active)
+{
+  const uint8_t cs = B4_BIT(B4_PIN_LCD_CS);
+  b4_out_write(active ? (uint8_t)(s_b4_out & ~cs) : (uint8_t)(s_b4_out | cs));
+}
+
+// Clock idles HIGH; data is set with SCK low and latched on the rising edge.
+static void b4_spi_write9(uint16_t v)
+{
+  const uint8_t sck = B4_BIT(B4_PIN_LCD_SCK);
+  const uint8_t sda = B4_BIT(B4_PIN_LCD_SDA);
+  for (int i = 8; i >= 0; --i) {
+    uint8_t o = (uint8_t)(s_b4_out & ~sck);
+    if ((v >> i) & 1) o |= sda; else o &= (uint8_t)~sda;
+    b4_out_write(o);
+    b4_out_write((uint8_t)(o | sck));
+  }
+}
+
+// Run the Arduino_GFX-style op list from st7701_init.h over the expander SPI.
+static void b4_run_init_ops(const uint8_t *ops, size_t len)
+{
+  auto cmd  = [](uint8_t c) { b4_spi_write9(c); };
+  auto data = [](uint8_t d) { b4_spi_write9((uint16_t)(0x100 | d)); };
+  size_t i = 0;
+  while (i < len) {
+    uint8_t op = ops[i++];
+    switch (op) {
+      case BEGIN_WRITE:     b4_spi_cs(true);  break;
+      case END_WRITE:       b4_spi_cs(false); break;
+      case WRITE_COMMAND_8: if (i < len) cmd(ops[i++]); break;
+      case WRITE_DATA_8:    if (i < len) data(ops[i++]); break;
+      case WRITE_DATA_16:   if (i + 1 < len) { data(ops[i]); data(ops[i + 1]); i += 2; } break;
+      case WRITE_BYTES: {
+        if (i >= len) break;
+        uint8_t n = ops[i++];
+        for (uint8_t k = 0; k < n && i < len; ++k) data(ops[i++]);
+        break;
+      }
+      case WRITE_C8_D8:     if (i + 1 < len) { cmd(ops[i]); data(ops[i + 1]); i += 2; } break;
+      case WRITE_C8_D16:    if (i + 2 < len) { cmd(ops[i]); data(ops[i + 1]); data(ops[i + 2]); i += 3; } break;
+      case DELAY:           if (i < len) delay(ops[i++]); break;
+      default:
+        ets_printf("[DISPLAY] 4B: unknown init op %u at %u\r\n", (unsigned)op, (unsigned)(i - 1));
+        return;
+    }
+  }
+}
+
+static void ST7701_Init_4B()
+{
+  uint32_t t0 = millis();
+  // Expander already configured by setup(); resync shadow from the real latch.
+  uint8_t cur;
+  if (I2C_Read_EXIO_safe(TCA9554_OUTPUT_REG, &cur)) s_b4_out = cur;
+  s_b4_out |= B4_BIT(B4_PIN_LCD_CS) | B4_BIT(B4_PIN_LCD_SCK) | B4_BIT(B4_PIN_LCD_SDA);
+  s_b4_out &= (uint8_t)~B4_BIT(B4_PIN_AMP_EN);
+  b4_out_write(s_b4_out);
+
+  b4_run_init_ops(st7701_type1_init_operations, st7701_type1_init_operations_len);
+  b4_spi_cs(false);
+  ets_printf("[DISPLAY] 4B: ST7701 init sequence sent via TCA9554 in %u ms\r\n",
+             (unsigned)(millis() - t0));
+
+  esp_lcd_rgb_panel_config_t rgb_config = {
+    .clk_src = LCD_CLK_SRC_PLL160M,
+    .timings =  {
+      .pclk_hz = ESP_PANEL_LCD_RGB_TIMING_FREQ_HZ,
+      .h_res = ESP_PANEL_LCD_WIDTH,
+      .v_res = ESP_PANEL_LCD_HEIGHT,
+      .hsync_pulse_width = ESP_PANEL_LCD_RGB_TIMING_HPW,
+      .hsync_back_porch = ESP_PANEL_LCD_RGB_TIMING_HBP,
+      .hsync_front_porch = ESP_PANEL_LCD_RGB_TIMING_HFP,
+      .vsync_pulse_width = ESP_PANEL_LCD_RGB_TIMING_VPW,
+      .vsync_back_porch = ESP_PANEL_LCD_RGB_TIMING_VBP,
+      .vsync_front_porch = ESP_PANEL_LCD_RGB_TIMING_VFP,
+      .flags = {
+        .pclk_active_neg = 0,   // Waveshare 4B reference uses rising edge
+      },
+    },
+    .data_width = ESP_PANEL_LCD_RGB_DATA_WIDTH,
+    .psram_trans_align = 64,
+    .hsync_gpio_num = 46,
+    .vsync_gpio_num = 3,
+    .de_gpio_num = 17,
+    .pclk_gpio_num = 9,
+    .data_gpio_nums = {
+      40, 41, 42, 2, 1,          // B0..B4
+      21, 8, 18, 45, 38, 39,     // G0..G5
+      10, 11, 12, 13, 14,        // R0..R4
+    },
+    .disp_gpio_num = -1,
+  };
+  rgb_config.flags.fb_in_psram = (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > 0);
+
+  esp_err_t rc = esp_lcd_new_rgb_panel(&rgb_config, &panel_handle);
+  if (rc != ESP_OK || panel_handle == NULL) {
+    ets_printf("[DISPLAY] 4B: esp_lcd_new_rgb_panel failed: %s\r\n", esp_err_to_name(rc));
+    panel_handle = NULL;
+    return;
+  }
+  esp_lcd_panel_reset(panel_handle);
+  esp_lcd_panel_init(panel_handle);
+  ets_printf("[DISPLAY] 4B: RGB panel running\r\n");
+}
+#endif // BOARD_WAVESHARE_4B
+
 // Reset helper stub for ST7701 (no-op if hardware reset handled elsewhere)
 void ST7701_Reset()
 {
-  if (is_board_v4()) {
+  if (is_board_4b()) {
+    ets_printf("[DISPLAY] ST7701_Reset: 4B board, pulsing LCD_RST (EXIO7)\r\n");
+    Mode_EXIO(B4_PIN_LCD_RST, 0);
+    Set_EXIO(B4_PIN_LCD_RST, Low);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    Set_EXIO(B4_PIN_LCD_RST, High);
+    vTaskDelay(pdMS_TO_TICKS(120));
+  } else if (is_board_v4()) {
     // V4 boards: CH32V003 IO expander at 0x24.
     // TCA9554PWR_Init has already set direction (0x3A) and output latch (0xFF).
     // Now pulse LCD_RST (EXIO3/bit3) via the fixed driver functions.
@@ -569,6 +698,16 @@ static void LCD_FillSolid(uint16_t color565)
 }
 
 void LCD_Init() {
+#if defined(BOARD_WAVESHARE_4B)
+  if (LCD_Backlight_PIN >= 0) {            // backlight to minimum during init (active-LOW)
+    pinMode(LCD_Backlight_PIN, OUTPUT);
+    digitalWrite(LCD_Backlight_PIN, HIGH);
+  }
+  ST7701_Reset();
+  ST7701_Init_4B();
+  Backlight_Init();
+  return;
+#endif
   // Ensure expander-controlled backlight is off briefly to emulate a power-cycle.
   // EXIO_PIN2 = bit1: on v3 this is the BL pin; on v4 bit1 = TP_RST (GT911 reset).
   // Only do this on v3 — touching it on v4 puts GT911 into hardware reset and
@@ -615,7 +754,12 @@ void LCD_addWindow(uint16_t Xstart, uint16_t Ystart, uint16_t Xend, uint16_t Yen
 
 
 // backlight
+#if defined(BOARD_WAVESHARE_4B)
+// 4B: real PWM backlight — the legacy default of 50 meant half brightness.
+uint8_t LCD_Backlight = 100;
+#else
 uint8_t LCD_Backlight = 50;
+#endif
 void Backlight_Init()
 {
   // Configure LEDC timer/channel only if an MCU pin is provided.
@@ -642,7 +786,8 @@ void Backlight_Init()
   }
 
   // Ensure expander BL_EN (EXIO2) is configured as output and set initial state
-  Mode_EXIO(EXIO_PIN2, 0);
+  // (V3 only — on the 4B EXIO1 is the LCD SPI data line, backlight is GPIO4)
+  if (!is_board_4b()) Mode_EXIO(EXIO_PIN2, 0);
   Set_Backlight(LCD_Backlight); // initialize to saved brightness (will toggle EXIO2)
 }
 
@@ -654,11 +799,20 @@ void Set_Backlight(uint8_t Light)
   }
   uint32_t max_duty = (1u << Resolution) - 1u;
   uint32_t duty = (uint32_t)Light * max_duty / Backlight_MAX;
+#if defined(BOARD_WAVESHARE_4B)
+  // 4B backlight is active-LOW (Waveshare BSP writes duty = 100% - brightness):
+  // GPIO4 LOW = full brightness, HIGH = dimmest.
+  duty = max_duty - duty;
+#endif
   if (LCD_Backlight_PIN >= 0) {
     ledc_set_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)PWM_Channel, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, (ledc_channel_t)PWM_Channel);
   }
-  if (is_board_v4()) {
+  if (is_board_4b()) {
+    // 4B: LEDC duty on GPIO4 above is all that's needed.
+    Serial.printf("[BACKLIGHT] 4B: %u%% (duty %u/%u on GPIO%d)\n",
+                  (unsigned)Light, (unsigned)duty, (unsigned)max_duty, LCD_Backlight_PIN);
+  } else if (is_board_v4()) {
     // V4: CH32V003 PWM register, inverted (0=full bright, 255=off).
     // Map Light 0-100 → PWM 255-0.
     uint8_t pwm = (Light == 0) ? 255 : (uint8_t)((uint32_t)(100 - Light) * 255 / 100);

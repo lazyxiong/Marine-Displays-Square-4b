@@ -64,6 +64,7 @@ static lv_obj_t *ui_BrightnessPctLabel = NULL;       // value label (V4: %, V3: 
 extern "C" void trigger_buzzer_alert() {
     if (buzzer_mode == 0) return;
     printf("trigger_buzzer_alert() called, buzzer_mode=%d\n", buzzer_mode);
+    if (is_board_4b()) return;   // 4B has no buzzer (EXIO5 there is the touch reset)
 
     if (is_board_v4()) {
       // V4 (CH32V003): BEE_EN = EXIO6/bit6 = PIN_BEE_EN (pin 7).
@@ -222,7 +223,7 @@ extern "C" void update_settings_values(void)
         lv_slider_set_value(ui_BrightnessSliderWidget, brightness_level, LV_ANIM_OFF);
     }
     if (ui_BrightnessPctLabel != NULL) {
-        if (is_board_v4()) {
+        if (board_has_pwm_backlight()) {
             uint16_t sv = brightness_level;
             uint8_t pwm = v4_slider_to_pwm(sv);
             if (sv >= 110) {
@@ -378,7 +379,7 @@ extern "C" void brightness_nvs_flush(void) {
     if (g_brightness_dirty &&
         (millis() - g_brightness_last_change_ms) >= BRIGHTNESS_NVS_DEFER_MS) {
         g_brightness_dirty = false;
-        if (is_board_v4()) {
+        if (board_has_pwm_backlight()) {
             // Apply final PWM value directly (don't call set_brightness_level
             // which would re-dirty the flag and cause an infinite save loop)
             uint16_t sv = g_brightness_pending;
@@ -409,7 +410,7 @@ static const uint32_t PWM_WRITE_MIN_INTERVAL_MS = 50;
 // 5 quick taps anywhere: full brightness, normal colours (no red/night
 // overlay). Saved like a slider change.
 extern "C" void brightness_set_full(void) {
-    if (is_board_v4()) {
+    if (board_has_pwm_backlight()) {
         set_brightness_level(200);  // top of the slider: 100%, no red overlay
         extern void Set_Backlight(uint8_t Light);
         Set_Backlight(100);         // don't wait for the PWM write throttle
@@ -421,7 +422,7 @@ extern "C" void brightness_set_full(void) {
 
 extern "C" void set_brightness_level(uint8_t level) {
     brightness_level = level;
-    if (is_board_v4()) {
+    if (board_has_pwm_backlight()) {
         // V4 unified slider 10-200:
         //   200→110: PWM brightness (level-100)% with no overlay
         //   109→10:  red overlay mode, PWM = level%
@@ -813,7 +814,7 @@ extern "C" void ui_Settings_screen_init(void)
     lv_obj_set_y(ui_BrightnessPctLabel, 145);
     lv_obj_set_align(ui_BrightnessPctLabel, LV_ALIGN_CENTER);
 
-    if (is_board_v4()) {
+    if (board_has_pwm_backlight()) {
         // V4: unified slider 10-200
         // 200→110: normal PWM backlight 100%→10% (no overlay)
         // 109→10:  red overlay mode, PWM 100%→10%

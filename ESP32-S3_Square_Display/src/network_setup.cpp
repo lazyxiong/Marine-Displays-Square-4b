@@ -3,6 +3,7 @@
 #include "gauge_config.h"
 #include "version.h"
 #include "ota_guard.h"
+#include "ota_check.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -858,6 +859,28 @@ void handle_gauges_page() {
     // any in-flight background preload loop aborts and the user's request wins.
     html += "var preloadGen=0;\n";
     html += "var fragmentCache={};\n";
+    // Tabs already shown keep their live page content (with any edits, saved
+    // or not) while another tab is open, so coming back shows them as left.
+    html += "var tabNodes={};\n";
+    html += "function parkTab(){\n";
+    html += "  var cont=document.getElementById('screen-content');\n";
+    html += "  var t=cont.getAttribute('data-tab');\n";
+    html += "  if(t===null)return;\n";
+    html += "  var hold=document.createDocumentFragment();\n";
+    html += "  while(cont.firstChild)hold.appendChild(cont.firstChild);\n";
+    html += "  tabNodes[t]=hold;\n";
+    html += "  cont.removeAttribute('data-tab');\n";
+    html += "}\n";
+    html += "function unparkTab(idx){\n";
+    html += "  var hold=tabNodes[idx];\n";
+    html += "  if(!hold)return false;\n";
+    html += "  delete tabNodes[idx];\n";
+    html += "  var cont=document.getElementById('screen-content');\n";
+    html += "  cont.innerHTML='';\n";
+    html += "  cont.appendChild(hold);\n";
+    html += "  cont.setAttribute('data-tab',idx);\n";
+    html += "  return true;\n";
+    html += "}\n";
 
     // showScreenTab: switch tab + load fragment (from cache or device)
     html += "function showScreenTab(idx){\n";
@@ -869,6 +892,10 @@ void handle_gauges_page() {
     html += "    var b=document.getElementById('tabbtn_'+s);\n";
     html += "    if(b) b.style.background=(s===idx?'#e3eaf6':'#f4f6fa');\n";
     html += "  }\n";
+    // Always switch the physical display, even when the fragment is cached
+    html += "  fetch('/gauges/switch?s='+idx).catch(function(){});\n";
+    html += "  parkTab();\n";
+    html += "  if(unparkTab(idx))return;\n";
     html += "  loadScreenFragment(idx);\n";
     html += "}\n";
 
@@ -878,6 +905,7 @@ void handle_gauges_page() {
     html += "  var cont=document.getElementById('screen-content');\n";
     html += "  if(fragmentCache[idx]){\n";
     html += "    cont.innerHTML=fragmentCache[idx];\n";
+    html += "    cont.setAttribute('data-tab',idx);\n";
     html += "    setTimeout(function(){initScreenTab(idx);},10);\n";
     html += "    return;\n";
     html += "  }\n";
@@ -886,9 +914,13 @@ void handle_gauges_page() {
     html += "    .then(function(r){return r.text();})\n";
     html += "    .then(function(h){\n";
     html += "      fragmentCache[idx]=h;\n";
+    html += "      if(currentTab!==idx)return;\n";   // user has moved to another tab
     html += "      cont.innerHTML=h;\n";
+    html += "      cont.setAttribute('data-tab',idx);\n";
     html += "      setTimeout(function(){initScreenTab(idx);},10);\n";
-    html += "      preloadFragments(idx);\n";
+    // No background loading of the other tabs: each one costs ~10 KB of the
+    // internal RAM WiFi needs, and on busy Signal K setups it starved the
+    // connection. Tabs load when clicked.
     html += "    })\n";
     // Retry up to 3 times on network error (e.g. server still closing shell connection)
     html += "    .catch(function(e){\n";
@@ -924,8 +956,8 @@ void handle_gauges_page() {
     html += "function toggleGaugeConfig(screen){\n";
     html += "  var sel=document.getElementById('displaytype_'+screen);\n";
     html += "  if(!sel) return;\n";
-    html += "  var divIds=['gaugeconfig','numberconfig','dualconfig','quadconfig','gaugenumconfig','graphconfig','compassconfig','positionconfig','aisconfig','anchorconfig'];\n";
-    html += "  var typeMap={'0':['gaugeconfig'],'1':['numberconfig'],'2':['dualconfig'],'3':['quadconfig'],'4':['gaugeconfig','gaugenumconfig'],'5':['graphconfig'],'6':['compassconfig'],'7':['positionconfig'],'8':['aisconfig'],'9':['anchorconfig']};\n";
+    html += "  var divIds=['gaugeconfig','numberconfig','dualconfig','quadconfig','gaugenumconfig','graphconfig','compassconfig','positionconfig','aisconfig','anchorconfig','windconfig'];\n";
+    html += "  var typeMap={'0':['gaugeconfig'],'1':['numberconfig'],'2':['dualconfig'],'3':['quadconfig'],'4':['gaugeconfig','gaugenumconfig'],'5':['graphconfig'],'6':['compassconfig'],'7':['positionconfig'],'8':['aisconfig'],'9':['anchorconfig'],'10':['windconfig']};\n";
     html += "  var show=typeMap[sel.value]||[];\n";
     html += "  divIds.forEach(function(d){\n";
     html += "    var el=document.getElementById(d+'_'+screen);\n";
@@ -1070,12 +1102,23 @@ void handle_gauges_screen() {
         g_http_html_buf_reserved = true;
     }
     html.clear();
+    // Stop sending if the browser has gone or the send has dragged on: each
+    // write waits while memory is low, and the display is frozen meanwhile
+    // (one report: 7 minutes on a single tab).
+    const uint32_t send_start = millis();
+    bool send_abandoned = false;
     auto flushHtml = [&]() {
-        if (html.length() > 0) {
+        if (html.length() == 0) return;
+        if (!send_abandoned &&
+            (!config_server.client().connected() || millis() - send_start > 20000)) {
+            send_abandoned = true;
+            Serial.printf("[GAUGES] fragment s=%d abandoned (browser gone or too slow)\n", s);
+        }
+        if (!send_abandoned) {
             esp_task_wdt_reset();
             config_server.sendContent(html);
-            html.clear();
         }
+        html.clear();
     };
 
     // ── stream_screen_config inlined ─────────────────────────────────
@@ -1083,8 +1126,8 @@ void handle_gauges_screen() {
 
     // Display Type dropdown
     html += "<div style='margin-bottom:16px;'><label>Display Type: <select name='displaytype_" + String(s) + "' id='displaytype_" + String(s) + "' onchange='toggleGaugeConfig(" + String(s) + ")'>";
-    const char* dtNames[] = {"Gauge","Number","Dual","Quad","Gauge + Number","Graph","Compass","Position","AIS","Anchor Alarm"};
-    for (int dt = 0; dt < 10; ++dt) {
+    const char* dtNames[] = {"Gauge","Single Value","Dual Value","Quad Value","Gauge + Value","Graph","Compass","Position","AIS","Anchor Alarm","Wind"};
+    for (int dt = 0; dt < 11; ++dt) {
         html += "<option value='" + String(dt) + "'";
         if (screen_configs[s].display_type == dt) html += " selected";
         html += ">" + String(dtNames[dt]) + "</option>";
@@ -1119,7 +1162,7 @@ void handle_gauges_screen() {
     // ── Number display config ────────────────────────────────────────
     bool isCustomColor = (String(screen_configs[s].background_path) == "Custom Color");
     html += "<div id='numberconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 1 ? "block" : "none") + ";'>";
-    html += "<h4>Number Display Settings</h4>";
+    html += "<h4>Single Value Settings</h4>";
     html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='number_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].number_path) + "' style='width:80%'></label></div>";
     html += "<div id='number_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
     html += "<label>Background Color: <input name='number_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
@@ -1180,9 +1223,32 @@ void handle_gauges_screen() {
     html += "</div></div>"; // end compass
     flushHtml();
 
+    // ── Wind config ──────────────────────────────────────────────────
+    html += "<div id='windconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == DISPLAY_TYPE_WIND ? "block" : "none") + ";'>";
+    html += "<h4>Wind Settings</h4>";
+    html += "<p style='color:#888;font-size:0.9em;margin:0 0 8px'>Apparent wind from <code>environment.wind.angleApparent</code> / <code>speedApparent</code>. "
+            "True wind, wind direction and drift are used when your system sends them, otherwise worked out from boat speed, heading and GPS (shown with a <em>calc</em> tag). "
+            "Missing or out-of-date data shows --.</p>";
+    html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='wind_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "<h4>Bottom Fields</h4><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    {
+        const char* posName[2] = {"bl", "br"};
+        const char* title[2]   = {"Bottom-Left (empty = TWS)", "Bottom-Right (empty = TWD)"};
+        const char* paths[2]   = {screen_configs[s].quad_bl_path, screen_configs[s].quad_br_path};
+        const char* cols[2]    = {screen_configs[s].quad_bl_font_color, screen_configs[s].quad_br_font_color};
+        for (int f = 0; f < 2; f++) {
+            String pre = "wind_" + String(posName[f]) + "_";
+            html += "<div style='flex:1;min-width:200px;'><h5>" + String(title[f]) + "</h5>";
+            html += "<div style='margin-bottom:4px;'><label>SignalK Path: <input name='" + pre + "path_" + String(s) + "' type='text' value='" + String(paths[f]) + "' placeholder='" + String(f == 0 ? "TWS" : "TWD") + "' style='width:90%'></label></div>";
+            html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='" + pre + "font_color_" + String(s) + "' type='color' value='" + String(cols[f][0] ? cols[f] : "#FFFFFF") + "'></label></div></div>";
+        }
+    }
+    html += "</div></div>"; // end wind
+    flushHtml();
+
     // ── Dual display config ──────────────────────────────────────────
     html += "<div id='dualconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 2 ? "block" : "none") + ";'>";
-    html += "<h4>Dual Display Settings</h4>";
+    html += "<h4>Dual Value Settings</h4>";
     html += "<div id='dual_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
     html += "<label>Background Color: <input name='dual_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
     // Top
@@ -1235,7 +1301,7 @@ void handle_gauges_screen() {
 
     // ── Quad display config ──────────────────────────────────────────
     html += "<div id='quadconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 3 ? "block" : "none") + ";'>";
-    html += "<h4>Quad Display Settings</h4>";
+    html += "<h4>Quad Value Settings</h4>";
     html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='quad_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
     // Quad quadrant helper
     auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color, int g_alm, int zl, int zh) {
@@ -1356,7 +1422,7 @@ void handle_gauges_screen() {
 
     // ── Gauge + Number config ────────────────────────────────────────
     html += "<div id='gaugenumconfig_" + String(s) + "' style='display:" + String(screen_configs[s].display_type == 4 ? "block" : "none") + ";'>";
-    html += "<h4>Center Number Display</h4>";
+    html += "<h4>Centre Value</h4>";
     html += "<div style='margin-bottom:8px;'><label>SignalK Path: <input name='gauge_num_center_path_" + String(s) + "' type='text' value='" + String(screen_configs[s].gauge_num_center_path) + "' style='width:80%'></label></div>";
     html += "<div style='margin-bottom:8px;'><label>Font Size: <select name='gauge_num_center_font_size_" + String(s) + "'>";
     for (int fs = 0; fs < 5; fs++) {
@@ -1462,15 +1528,14 @@ void handle_gauges_screen() {
     html += "</div>"; // close anchorconfig
 
     flushHtml();
-    config_server.sendContent(""); // chunked terminator
-    Serial.printf("[GAUGES] fragment s=%d complete, iRAM=%u\n", s,
+    if (!send_abandoned) config_server.sendContent(""); // chunked terminator
+    Serial.printf("[GAUGES] fragment s=%d complete in %lu ms, WiFi %d dBm, iRAM=%u\n", s,
+        (unsigned long)(millis() - send_start), (int)WiFi.RSSI(),
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
-    // Switch the physical display AFTER the HTTP response is fully sent.
-    // Doing it before/during the response caused LVGL DMA flushes to race
-    // with TCP send-buffer allocations, leading to crashes on the 2nd or
-    // 3rd save→reload cycle.
-    ui_set_screen(s + 1);         // 1-based
+    // The display is switched by /gauges/switch (called by showScreenTab on
+    // every tab click), not here: the page also fetches the other tabs in the
+    // background, and switching here moved the display to the last one fetched.
 
     // Keep WS paused — the 60-second g_config_page_last_seen watchdog
     // (or navigating away) will resume it.  Do NOT resume here;
@@ -1701,6 +1766,24 @@ void handle_save_gauges() {
                         saveCompassField("br", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color);
                     }
                     
+                    // Save wind screen settings — only for WIND screens (shares quad_bl/br fields with Compass)
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_WIND) {
+                        String bgk = "wind_bg_color_" + String(s);
+                        if (config_server.hasArg(bgk)) {
+                            strncpy(screen_configs[s].number_bg_color, config_server.arg(bgk).c_str(), 7);
+                            screen_configs[s].number_bg_color[7] = '\0';
+                        }
+                        // No font size: the bottom fields only fit the small font
+                        auto saveWindField = [&](const char* pos, char* path, char* color) {
+                            String pk = "wind_" + String(pos) + "_path_" + String(s);
+                            if (config_server.hasArg(pk)) { String v = config_server.arg(pk); v.trim(); strncpy(path, v.c_str(), 127); path[127] = '\0'; }
+                            String ck = "wind_" + String(pos) + "_font_color_" + String(s);
+                            if (config_server.hasArg(ck)) { strncpy(color, config_server.arg(ck).c_str(), 7); color[7] = '\0'; }
+                        };
+                        saveWindField("bl", screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_color);
+                        saveWindField("br", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_color);
+                    }
+
                     // Save quad display settings (TL, TR, BL, BR)
                     auto saveQuadrant = [&](const char* name, char* path, uint8_t& size, char* color) {
                         String pathKey = "quad_" + String(name) + "_path_" + String(s);
@@ -2222,6 +2305,8 @@ void handle_save_wifi() {
     }
 }
 
+bool Touch_Present(void);  // Touch_GT911.cpp
+
 void handle_device_page() {
     String html = "<html><head>";
     html += STYLE;
@@ -2242,6 +2327,10 @@ void handle_device_page() {
     html += "<option value='60'" + String(buzzer_cooldown_sec==60?" selected":"") + ">60s pause</option>";
     html += "</select></div>";
     // Auto-scroll (dropdown matching screen options)
+    if (!Touch_Present()) {
+        html += "<p style='background:#fff3e0;border:1px solid #ffcc80;border-radius:6px;padding:8px 10px'>"
+                "<b>No touch screen detected.</b> Use Auto-scroll to move between screens, and set brightness on this page.</p>";
+    }
     html += "<div class='form-row'><label>Auto-scroll:</label><select name='auto_scroll'>";
     html += "<option value='0'" + String(auto_scroll_sec==0?" selected":"") + ">Off</option>";
     html += "<option value='5'" + String(auto_scroll_sec==5?" selected":"") + ">5s</option>";
@@ -2393,17 +2482,41 @@ void handle_needles_page() {
     html += "<div class='tab-content'>";
     html += "<h2>Needle Styles</h2>";
     html += "<form method='POST' action='/save-needles'>";
-    // Screen/gauge selectors
-    html += "<div class='form-row'><label>Screen:</label><select name='screen'>";
+    // Screen/gauge selectors. Changing either reloads the page so the fields
+    // show that needle's settings (otherwise Save would copy the old values).
+    static const char* const dtNames[] = {"Gauge","Single Value","Dual Value","Quad Value","Gauge + Value","Graph","Compass","Position","AIS","Anchor Alarm","Wind"};
+    const int dtCount = sizeof(dtNames) / sizeof(dtNames[0]);
+    auto typeName = [&](int s) -> String {
+        int t = screen_configs[s].display_type;
+        return (t >= 0 && t < dtCount) ? String(dtNames[t]) : String("Unknown");
+    };
+    const char* reload = " onchange=\"location='/needles?screen='+this.form.screen.value+'&gauge='+this.form.gauge.value\"";
+    html += "<div class='form-row'><label>Screen:</label><select name='screen'" + String(reload) + ">";
     for (int i = 0; i < NUM_SCREENS; ++i) {
         // keep option value 0-based for backend, show 1-based to user
-        html += "<option value='" + String(i) + "'" + String(i==screen?" selected":"") + ">" + String(i+1) + "</option>";
+        html += "<option value='" + String(i) + "'" + String(i==screen?" selected":"") + ">" + String(i+1) + " - " + typeName(i) + "</option>";
     }
     html += "</select></div>";
-    html += "<div class='form-row'><label>Gauge:</label><select name='gauge'>";
+    html += "<div class='form-row'><label>Gauge:</label><select name='gauge'" + String(reload) + ">";
     html += "<option value='0'" + String(gauge==0?" selected":"") + ">Top</option>";
     html += "<option value='1'" + String(gauge==1?" selected":"") + ">Bottom</option>";
     html += "</select></div>";
+    // Say when this needle isn't shown, so changes here don't seem to do nothing
+    {
+        int t = screen_configs[screen].display_type;
+        String n = String(screen + 1);
+        String note;
+        if (t == DISPLAY_TYPE_GAUGE_NUMBER && gauge == 1)
+            note = "Screen " + n + " is a Gauge + Value screen, which has only the top needle.";
+        else if (t == DISPLAY_TYPE_GAUGE && gauge == 1 && !screen_configs[screen].show_bottom)
+            note = "The bottom gauge is switched off on screen " + n + ", so this needle isn't shown.";
+        else if (t != DISPLAY_TYPE_GAUGE && t != DISPLAY_TYPE_GAUGE_NUMBER)
+            note = "Screen " + n + " is a " + typeName(screen) + " screen, which doesn't use gauge needles.";
+        if (note.length()) {
+            html += "<p style='background:#fff3e0;color:#333;border:1px solid #ffcc80;border-radius:6px;padding:8px 10px;margin:8px 0;'>"
+                    + note + " Settings saved here are kept and used if the screen is changed to a gauge.</p>";
+        }
+    }
     // Color
     html += "<div class='form-row'><label>Color:</label><input name='color' type='color' value='" + s.color + "'></div>";
     // Width
@@ -2423,6 +2536,9 @@ void handle_needles_page() {
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
     html += "</div></div></body></html>";
     config_server.send(200, "text/html", html);
+    // Show the screen whose needle is being edited (after the reply is sent,
+    // as switching screens while sending raced LVGL DMA with TCP buffers)
+    ui_set_screen(screen + 1);   // 1-based
 }
 
 void handle_save_needles() {
@@ -2467,9 +2583,9 @@ void setup_network() {
     Serial.begin(115200);
     delay(100);
     Serial.printf("Flash size (ESP.getFlashChipSize()): %u bytes\n", ESP.getFlashChipSize());
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[ERROR] SPIFFS Mount Failed");
-    }
+    // SPIFFS is not used by this firmware. It used to be mounted here with
+    // format-on-fail, which after a full erase spent ~35 s formatting the
+    // empty partition on first boot, with the display stuck.
     // Note: Do not load preferences here; caller should load before UI init when required.
     // WiFi connect or AP fallback
     WiFi.mode(WIFI_STA);
@@ -2502,7 +2618,7 @@ void setup_network() {
     if (WiFi.status() == WL_CONNECTED) {
         // Disable power-save so the radio stays awake between loop() calls.
         WiFi.setSleep(false);
-        Serial.println("\nWiFi connected!");
+        Serial.printf("\nWiFi connected! Signal %d dBm (-50 good, -70 weak, -80 poor)\n", (int)WiFi.RSSI());
         Serial.print("IP: ");
         Serial.println(WiFi.localIP());
         // Start mDNS responder so device can be reached by hostname.local
@@ -2534,6 +2650,17 @@ void setup_network() {
         config_server.send(204);
     });
     config_server.on("/gauges/screen", handle_gauges_screen);
+    config_server.on("/gauges/switch", []() {
+        // Switch the display to the tab being configured. Sent on every tab
+        // click, including when the tab's fragment comes from the page cache.
+        int s = config_server.arg("s").toInt();
+        config_server.send(204);   // reply first: switching screens while
+                                   // sending raced LVGL DMA with TCP buffers
+        if (s >= 0 && s < NUM_SCREENS) {
+            g_config_page_last_seen = millis();
+            ui_set_screen(s + 1);  // 1-based
+        }
+    });
     config_server.on("/save-gauges", HTTP_POST, handle_save_gauges);
     config_server.on("/needles", handle_needles_page);
     config_server.on("/save-needles", HTTP_POST, handle_save_needles);
@@ -2584,6 +2711,16 @@ String get_signalk_path_by_index(int idx) {
 }
 
 // Get SignalK paths needed by a single screen (0-based index)
+// Everything the wind screen reads (see update_needles_for_screen in main.cpp)
+static const char* const WIND_SK_PATHS[] = {
+    "environment.wind.angleApparent", "environment.wind.speedApparent",
+    "environment.wind.angleTrueWater", "environment.wind.speedTrue",
+    "environment.wind.directionTrue",
+    "navigation.headingTrue", "navigation.headingMagnetic", "navigation.magneticVariation",
+    "navigation.speedThroughWater", "navigation.speedOverGround", "navigation.courseOverGroundTrue",
+    "environment.current",
+};
+
 std::vector<String> get_signalk_paths_for_screen(int s) {
     std::vector<String> paths;
     std::set<String> unique;
@@ -2643,6 +2780,11 @@ std::vector<String> get_signalk_paths_for_screen(int s) {
             add("navigation.position");
             add("navigation.courseOverGroundTrue");
             add("navigation.speedOverGround");
+            break;
+        case DISPLAY_TYPE_WIND:
+            for (const char* p : WIND_SK_PATHS) add(p);
+            add(screen_configs[s].quad_bl_path);
+            add(screen_configs[s].quad_br_path);
             break;
     }
     return paths;
@@ -3101,6 +3243,8 @@ void handle_ota_page() {
     html += "<title>OTA Firmware Update</title></head><body><div class='container'>";
     html += "<h2>Firmware Update</h2>";
     html += "<p style='font-size:0.85em;color:#888'>" + String(info) + "</p>";
+    html += ota_check_html("square", FW_VERSION);
+    html += "<h3>Or upload a file</h3>";
     html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
     html += "<p>Select the <b>update file</b> for this display, named <code>ota-marine-display-....bin</code>, "
             "from the <a href='https://github.com/Boatingwiththebaileys/Marine-Displays/releases' target='_blank'>GitHub releases</a>. "

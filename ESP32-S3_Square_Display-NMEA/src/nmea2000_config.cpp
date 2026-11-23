@@ -12,6 +12,7 @@
 
 #include "ais_display.h"            // ais_n2k_update_position/name
 #include "NMEA2000_esp32_twai.h"  // Our local TWAI driver for ESP32-S3
+#include "n2k_gateway.h"          // Optional: same data from a WiFi gateway
 #include <N2kMessages.h>
 #include <N2kMessagesEnumToStr.h>
 #include <freertos/FreeRTOS.h>
@@ -85,7 +86,7 @@ const char* n2k_field_label(N2kField f) {
         case N2K_LONGITUDE:           return "Longitude [129025]";
         case N2K_COG:                 return "COG [129026]";
         case N2K_SOG:                 return "SOG [129026]";
-        case N2K_GNSS_DATETIME:       return "GNSS Date/Time [129029]";
+        case N2K_GNSS_DATETIME:       return "Time (UTC) [126992/129029]";
         case N2K_GNSS_ALTITUDE:       return "GNSS Altitude [129029]";
         case N2K_GNSS_SATELLITES:     return "GNSS Satellites [129029]";
         case N2K_GNSS_HDOP:           return "GNSS HDOP [129029]";
@@ -108,6 +109,9 @@ const char* n2k_field_label(N2kField f) {
         case N2K_WIND_ANGLE_APPARENT: return "Wind Angle Apparent [130306]";
         case N2K_WIND_SPEED_TRUE:     return "Wind Speed True [130306]";
         case N2K_WIND_ANGLE_TRUE:     return "Wind Angle True [130306]";
+        case N2K_WIND_DIRECTION_TRUE: return "Wind Direction True [130306]";
+        case N2K_CURRENT_SET:         return "Current Set [130577]";
+        case N2K_CURRENT_DRIFT:       return "Current Drift [130577]";
         // Environment
         case N2K_TEMPERATURE:         return "Temperature Generic [130312]";
         case N2K_SEA_TEMPERATURE:     return "Sea Temperature [130310/312/316]";
@@ -143,7 +147,7 @@ const char* n2k_field_label(N2kField f) {
         case N2K_DC_SOURCE_VOLTAGE:   return "DC Source Voltage [127751]";
         case N2K_DC_SOURCE_CURRENT:   return "DC Source Current [127751]";
         // Time
-        case N2K_SYSTEM_TIME:         return "System Time [126992]";
+        case N2K_SYSTEM_TIME:         return "Date (UTC) [126992/129029]";
         default:                      return "None";
     }
 }
@@ -224,6 +228,9 @@ const char* n2k_field_unit(N2kField f) {
         case N2K_WIND_ANGLE_APPARENT: return "";
         case N2K_WIND_SPEED_TRUE:     return "m/s";
         case N2K_WIND_ANGLE_TRUE:     return "";
+        case N2K_WIND_DIRECTION_TRUE: return "";   // already degrees
+        case N2K_CURRENT_SET:         return "";   // already degrees
+        case N2K_CURRENT_DRIFT:       return "m/s";
         // Environment
         case N2K_TEMPERATURE:         return "K";
         case N2K_SEA_TEMPERATURE:     return "K";
@@ -389,6 +396,8 @@ N2kField n2k_field_from_stored(const String& stored) {
 }
 
 // ── Route a decoded value to every gauge/number slot that wants this field ──
+volatile int g_n2k_heading_true = 0;
+
 static void route_value(N2kField field, float value) {
     // Check the 10 gauge parameter slots
     for (int i = 0; i < TOTAL_PARAMS; i++) {
@@ -506,7 +515,10 @@ static void handle_heading(const tN2kMsg& msg) {               // PGN 127250
     double heading, deviation, variation;
     tN2kHeadingReference ref;
     if (ParseN2kHeading(msg, sid, heading, deviation, variation, ref)) {
-        if (!N2kIsNA(heading))   route_value(N2K_HEADING, (float)(heading * 180.0 / PI));
+        if (!N2kIsNA(heading)) {
+            g_n2k_heading_true = (ref == N2khr_true) ? 1 : 0;
+            route_value(N2K_HEADING, (float)(heading * 180.0 / PI));
+        }
         if (!N2kIsNA(deviation)) route_value(N2K_MAGNETIC_DEVIATION, (float)deviation);
         if (!N2kIsNA(variation)) route_value(N2K_MAGNETIC_VARIATION_HDG, (float)variation);
     }
@@ -707,11 +719,26 @@ static void handle_wind(const tN2kMsg& msg) {                  // PGN 130306
         if (ref == N2kWind_Apparent) {
             if (!N2kIsNA(speed)) route_value(N2K_WIND_SPEED_APPARENT, (float)speed);
             if (!N2kIsNA(angle)) route_value(N2K_WIND_ANGLE_APPARENT, (float)(angle * 180.0 / PI));
-        } else {
-            // True wind (ground-referenced or water-referenced)
+        } else if (ref == N2kWind_True_boat || ref == N2kWind_True_water) {
+            // True wind angle, relative to the bow
             if (!N2kIsNA(speed)) route_value(N2K_WIND_SPEED_TRUE, (float)speed);
             if (!N2kIsNA(angle)) route_value(N2K_WIND_ANGLE_TRUE, (float)(angle * 180.0 / PI));
+        } else if (ref == N2kWind_True_North) {
+            // True wind direction, relative to true north (not an angle off the bow)
+            if (!N2kIsNA(speed)) route_value(N2K_WIND_SPEED_TRUE, (float)speed);
+            if (!N2kIsNA(angle)) route_value(N2K_WIND_DIRECTION_TRUE, (float)(angle * 180.0 / PI));
         }
+    }
+}
+
+static void handle_direction_data(const tN2kMsg& msg) {        // PGN 130577
+    tN2kDataMode mode;
+    tN2kHeadingReference cogRef;
+    unsigned char sid;
+    double cog, sog, heading, stw, set, drift;
+    if (ParseN2kDirectionData(msg, mode, cogRef, sid, cog, sog, heading, stw, set, drift)) {
+        if (!N2kIsNA(set))   route_value(N2K_CURRENT_SET, (float)(set * 180.0 / PI));
+        if (!N2kIsNA(drift)) route_value(N2K_CURRENT_DRIFT, (float)drift);
     }
 }
 
@@ -950,6 +977,7 @@ static void handle_n2k_msg(const tN2kMsg& msg) {
         case 130314: handle_pressure(msg);          break;
         case 130316: handle_temperature_ext(msg);   break;
         case 130576: handle_trim_tab(msg);          break;
+        case 130577: handle_direction_data(msg);    break;
         default: break;
     }
 }
@@ -980,6 +1008,14 @@ void enable_nmea2000() {
     if (CAN_TX_PIN < 0 || CAN_RX_PIN < 0) return;   // board without CAN pins (e.g. 4B)
 
     init_sensor_mutex();
+
+    // WiFi gateway selected: don't open the CAN port, feed the same handler
+    // from the network instead.
+    if (n2k_gw_enabled()) {
+        n2k_running = true;
+        n2k_gw_start(handle_n2k_msg);
+        return;
+    }
 
     // Configure the NMEA2000 library
     NMEA2000.SetN2kCANMsgBufSize(8);      // 8-message TX buffer
@@ -1014,6 +1050,7 @@ void enable_nmea2000() {
 void disable_nmea2000() {
     if (!n2k_running) return;
     n2k_running = false;
+    n2k_gw_stop();
     if (n2k_task_handle) {
         vTaskDelay(pdMS_TO_TICKS(100));  // let task exit cleanly
         n2k_task_handle = nullptr;

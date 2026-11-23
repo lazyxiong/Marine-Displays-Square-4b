@@ -1,3 +1,4 @@
+#include "nmea2000_config.h"
 #include "signalk_config.h"
 #include "network_setup.h"
 #include "screen_config_c_api.h"
@@ -80,6 +81,25 @@ char g_sk_datetime[32]         = {0};  // SK writes here; RTC sync reads it
 static PsramMap<String, float> extended_sensor_values;
 static PsramMap<String, String> extended_sensor_units;
 static PsramMap<String, String> extended_sensor_descriptions;
+// When each path last arrived (millis), for screens that show "--" on old data
+static PsramMap<String, uint32_t> sensor_rx_times;
+
+// Milliseconds since the path last arrived; UINT32_MAX if it never has.
+uint32_t get_sensor_age_ms_by_path(const String& path) {
+    uint32_t age = UINT32_MAX;
+    if (path.length() && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+        auto it = sensor_rx_times.find(path);
+        if (it != sensor_rx_times.end()) age = millis() - it->second;
+        xSemaphoreGive(sensor_mutex);
+    }
+    return age;
+}
+
+// Value if it arrived within max_age_ms, else NAN.
+float get_fresh_value_by_path(const String& path, uint32_t max_age_ms) {
+    if (get_sensor_age_ms_by_path(path) > max_age_ms) return NAN;
+    return get_sensor_value_by_path(path);
+}
 
 // Path array for gauge parameter slots (loaded from NVS/SD config)
 static String signalk_paths[TOTAL_PARAMS];
@@ -145,6 +165,44 @@ void set_sensor_metadata(int index, const char* unit, const char* description) {
 }
 
 // Get sensor value by path (for number and dual displays that may use non-gauge paths)
+// ── Text values ─────────────────────────────────────────────────────────────
+// Time / date from the display's clock (set from the network, UTC).
+// want_time: "14:32", else "20 Nov 2026". Returns "--" until the clock is set.
+static void clock_text(bool want_time, String& text, String& desc) {
+    static const char* const MON[12] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                        "Jul","Aug","Sep","Oct","Nov","Dec"};
+    int yr, mo, dy, hr, mn, sc;
+    if (g_nav_datetime[0] == '\0' ||
+        sscanf(g_nav_datetime, "%d-%d-%dT%d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc) != 6 ||
+        mo < 1 || mo > 12) {
+        text = "--";
+        desc = want_time ? "Time (UTC)" : "Date (UTC)";
+        return;
+    }
+    char b[24];
+    if (want_time) {
+        snprintf(b, sizeof(b), "%02d:%02d", hr, mn);
+        text = b;
+        snprintf(b, sizeof(b), "UTC  %d %s %d", dy, MON[mo - 1], yr);
+        desc = b;
+    } else {
+        snprintf(b, sizeof(b), "%d %s %d", dy, MON[mo - 1], yr);
+        text = b;
+        desc = "Date (UTC)";
+    }
+}
+
+// True if this field is shown as text: the Time and Date fields, from the
+// display's clock (set from PGN 126992 / 129029). desc: description to use.
+bool get_sensor_text_by_path(const String& path, String& text, String& desc) {
+    desc = "";
+    if (path.length() == 0) return false;
+    N2kField f = n2k_field_from_stored(path);
+    if (f == N2K_GNSS_DATETIME) { clock_text(true,  text, desc); return true; }
+    if (f == N2K_SYSTEM_TIME)   { clock_text(false, text, desc); return true; }
+    return false;
+}
+
 float get_sensor_value_by_path(const String& path) {
     if (path.length() == 0) return NAN;
     
@@ -169,6 +227,11 @@ float get_sensor_value_by_path(const String& path) {
 // Thread-safe setter by path (for NMEA 2000 route_value)
 void set_sensor_value_by_path(const String& path, float value) {
     if (path.length() == 0) return;
+
+    if (sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+        sensor_rx_times[path] = millis();
+        xSemaphoreGive(sensor_mutex);
+    }
 
     // Check gauge paths first
     for (int i = 0; i < TOTAL_PARAMS; i++) {

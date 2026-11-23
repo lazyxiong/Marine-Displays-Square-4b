@@ -60,7 +60,14 @@ void set_sensor_metadata(int index, const char* unit, const char* description);
 
 // Path-based access (for number and dual displays that may use non-gauge paths)
 float get_sensor_value_by_path(const String& path);
+// Text value for a path (e.g. "motoring", or the time). desc: description
+// to use instead of the usual one ("" = keep it). False if it is a number.
+bool get_sensor_text_by_path(const String& path, String& text, String& desc);
 void  set_sensor_value_by_path(const String& path, float value);
+// Milliseconds since the path last arrived (UINT32_MAX = never), and the value
+// only if it arrived within max_age_ms (else NAN).
+uint32_t get_sensor_age_ms_by_path(const String& path);
+float get_fresh_value_by_path(const String& path, uint32_t max_age_ms);
 void  set_sensor_unit_by_path(const String& path, const String& unit);
 void  set_sensor_description_by_path(const String& path, const String& desc);
 String get_sensor_unit_by_path(const String& path);

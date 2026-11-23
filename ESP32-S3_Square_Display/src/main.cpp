@@ -1,5 +1,6 @@
 #include <Preferences.h>
 #include "tap_reset.h"
+#include "power_key.h"
 #include <esp_err.h>
 #include <WiFi.h>
 // Global test mode flag: disables live data updates when true
@@ -25,6 +26,7 @@ bool test_mode = false;
 #include "graph_display.h"
 #include "position_display.h"
 #include "compass_display.h"
+#include "wind_display.h"
 #include "ais_display.h"
 #include "anchor_display.h"
 #include "unit_convert.h"
@@ -225,6 +227,17 @@ static float last_display_values[5] = {NAN, NAN, NAN, NAN, NAN};
 static String last_display_units[5] = {"", "", "", "", ""};
 static String last_display_descriptions[5] = {"", "", "", "", ""};
 
+
+// Text value for a path (e.g. "motoring", or the time), and the description
+// to show with it. Text values have no units and no alarms.
+static bool path_text(int screen_idx, int slot, const String& path, String& text, String& desc) {
+    String tdesc;
+    if (path.length() == 0 || !get_sensor_text_by_path(path, text, tdesc)) return false;
+    desc = tdesc.length() ? tdesc : get_sensor_description_by_path(path);
+    (void)screen_idx; (void)slot;
+    return true;
+}
+
 // Reset tracking for number display (called when display is externally recreated)
 extern "C" void reset_number_display_tracking(int screen_num) {
     if (screen_num < 1 || screen_num > 5) return;
@@ -245,8 +258,23 @@ extern "C" void force_update_number_display(int screen_num) {
     // Get the configured Signal K path
     String number_path = String(screen_configs[screen_idx].number_path);
     if (number_path.length() == 0) {
-        number_display_update(screen_idx, 0.0f, "No Path", "");
+        number_display_update(screen_idx, NAN, "No Path", "");
         return;
+    }
+
+    {   // Text value (e.g. "motoring", the time): shown as-is
+        String txt, tdesc;
+        if (path_text(screen_idx, 0, number_path, txt, tdesc)) {
+            if (!number_displays_created[screen_idx]) {
+                number_display_create(screen_idx);
+                number_displays_created[screen_idx] = true;
+            }
+            number_display_update_text(screen_idx, txt.c_str(), "", tdesc.c_str());
+            last_display_values[screen_idx] = NAN;
+            last_display_units[screen_idx] = "";
+            last_display_descriptions[screen_idx] = "";
+            return;
+        }
     }
     
     // Get current sensor data
@@ -261,7 +289,7 @@ extern "C" void force_update_number_display(int screen_num) {
     if (!isnan(display_value)) {
         number_display_update(screen_idx, display_value, unit_str.c_str(), description.c_str());
     } else {
-        number_display_update(screen_idx, 0.0f, unit_str.c_str(), description.c_str());
+        number_display_update(screen_idx, NAN, unit_str.c_str(), description.c_str());
     }
     
     // Update tracking with current values
@@ -284,8 +312,23 @@ static void update_number_display_for_screen(int screen_num) {
             number_display_create(screen_idx);
             number_displays_created[screen_idx] = true;
         }
-        number_display_update(screen_idx, 0.0f, "No Path", "");
+        number_display_update(screen_idx, NAN, "No Path", "");
         return;
+    }
+
+    {   // Text value (e.g. "motoring", the time): shown as-is
+        String txt, tdesc;
+        if (path_text(screen_idx, 0, number_path, txt, tdesc)) {
+            if (!number_displays_created[screen_idx]) {
+                number_display_create(screen_idx);
+                number_displays_created[screen_idx] = true;
+            }
+            number_display_update_text(screen_idx, txt.c_str(), "", tdesc.c_str());
+            last_display_values[screen_idx] = NAN;
+            last_display_units[screen_idx] = "";
+            last_display_descriptions[screen_idx] = "";
+            return;
+        }
     }
     
     // Find the sensor index for this path
@@ -340,7 +383,7 @@ static void update_number_display_for_screen(int screen_num) {
         if (!isnan(display_value)) {
             number_display_update(screen_idx, display_value, unit_str.c_str(), description.c_str());
         } else {
-            number_display_update(screen_idx, 0.0f, unit_str.c_str(), description.c_str());
+            number_display_update(screen_idx, NAN, unit_str.c_str(), description.c_str());
         }
         
         // Save current state
@@ -396,7 +439,7 @@ static void update_dual_number_display_for_screen(int screen_num) {
     // Helper lambda to get value and metadata for a path
     auto get_path_data = [](const String& path, float& value, String& unit, String& description) {
         if (path.length() == 0) {
-            value = 0.0f;
+            value = NAN;
             unit = "No Path";
             description = "";
             return false;
@@ -408,7 +451,7 @@ static void update_dual_number_display_for_screen(int screen_num) {
         description = get_sensor_description_by_path(path);
         
         if (isnan(value)) {
-            unit = "N/A";
+            unit = "";
             description = "";
             return false;
         }
@@ -430,14 +473,17 @@ static void update_dual_number_display_for_screen(int screen_num) {
     get_path_data(bottom_path, bottom_value, bottom_unit, bottom_description);
     
     // Update both displays
-    dual_number_display_update_top(screen_idx, 
-                                     isnan(top_value) ? 0.0f : top_value, 
-                                     top_unit.c_str(), 
-                                     top_description.c_str());
-    dual_number_display_update_bottom(screen_idx, 
-                                        isnan(bottom_value) ? 0.0f : bottom_value, 
-                                        bottom_unit.c_str(), 
-                                        bottom_description.c_str());
+    {   // Text values (e.g. "motoring", the time) are shown as-is; missing numbers as "--"
+        String txt, tdesc;
+        if (path_text(screen_idx, 0, top_path, txt, tdesc))
+            dual_number_display_update_top_text(screen_idx, txt.c_str(), "", tdesc.c_str());
+        else
+            dual_number_display_update_top(screen_idx, top_value, top_unit.c_str(), top_description.c_str());
+        if (path_text(screen_idx, 1, bottom_path, txt, tdesc))
+            dual_number_display_update_bottom_text(screen_idx, txt.c_str(), "", tdesc.c_str());
+        else
+            dual_number_display_update_bottom(screen_idx, bottom_value, bottom_unit.c_str(), bottom_description.c_str());
+    }
 
     // Buzzer alarm check for Dual display
     // Top:    min/max/buzzer[0][1] = low,  [0][2] = high
@@ -489,7 +535,7 @@ static void update_quad_number_display_for_screen(int screen_num) {
     // Helper lambda to get value and metadata for a path
     auto get_path_data = [](const String& path, float& value, String& unit, String& description) {
         if (path.length() == 0) {
-            value = 0.0f;
+            value = NAN;
             unit = "No Path";
             description = "";
             return false;
@@ -501,7 +547,7 @@ static void update_quad_number_display_for_screen(int screen_num) {
         description = get_sensor_description_by_path(path);
         
         if (isnan(value)) {
-            unit = "N/A";
+            unit = "";
             description = "";
             return false;
         }
@@ -521,10 +567,18 @@ static void update_quad_number_display_for_screen(int screen_num) {
     get_path_data(br_path, br_value, br_unit, br_description);
     
     // Update all quadrants
-    quad_number_display_update_tl(screen_idx, isnan(tl_value) ? 0.0f : tl_value, tl_unit.c_str(), tl_description.c_str());
-    quad_number_display_update_tr(screen_idx, isnan(tr_value) ? 0.0f : tr_value, tr_unit.c_str(), tr_description.c_str());
-    quad_number_display_update_bl(screen_idx, isnan(bl_value) ? 0.0f : bl_value, bl_unit.c_str(), bl_description.c_str());
-    quad_number_display_update_br(screen_idx, isnan(br_value) ? 0.0f : br_value, br_unit.c_str(), br_description.c_str());
+    {   // Text values (e.g. "motoring", the time) are shown as-is; missing numbers as "--"
+        const String* qpaths[4] = { &tl_path, &tr_path, &bl_path, &br_path };
+        String txt, tdesc;
+        for (int q = 0; q < 4; q++) {
+            if (path_text(screen_idx, q, *qpaths[q], txt, tdesc))
+                quad_number_display_update_text(screen_idx, q, txt.c_str(), "", tdesc.c_str());
+            else if (q == 0) quad_number_display_update_tl(screen_idx, tl_value, tl_unit.c_str(), tl_description.c_str());
+            else if (q == 1) quad_number_display_update_tr(screen_idx, tr_value, tr_unit.c_str(), tr_description.c_str());
+            else if (q == 2) quad_number_display_update_bl(screen_idx, bl_value, bl_unit.c_str(), bl_description.c_str());
+            else             quad_number_display_update_br(screen_idx, br_value, br_unit.c_str(), br_description.c_str());
+        }
+    }
 
     // Buzzer alarm check for Quad display
     // Slot mapping: TL=g0 z1(low)/z2(high), TR=g0 z3(low)/z4(high)
@@ -747,6 +801,41 @@ extern "C" void update_needles_for_screen(int screen_num) {
         compass_get_field(br_path, br_val, br_unit, br_desc);
         compass_display_update_bl(screen_idx, bl_val, bl_unit.c_str(), bl_desc.c_str());
         compass_display_update_br(screen_idx, br_val, br_unit.c_str(), br_desc.c_str());
+        return;
+    } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_WIND) {
+        // Wind screen — Signal K angles in radians, speeds in m/s
+        auto fresh = [](const char* path) { return get_fresh_value_by_path(String(path), WIND_STALE_MS); };
+        auto deg = [](float rad) { return isnan(rad) ? NAN : rad * (180.0f / (float)M_PI); };
+        WindInputs in;
+        in.awa_deg  = deg(fresh("environment.wind.angleApparent"));
+        in.aws_ms   = fresh("environment.wind.speedApparent");
+        in.twa_deg  = deg(fresh("environment.wind.angleTrueWater"));
+        in.tws_ms   = fresh("environment.wind.speedTrue");
+        in.twd_deg  = deg(fresh("environment.wind.directionTrue"));
+        float hdg_t = fresh("navigation.headingTrue");
+        float hdg_m = fresh("navigation.headingMagnetic");
+        in.hdg_true = !isnan(hdg_t);
+        in.hdg_deg  = deg(in.hdg_true ? hdg_t : hdg_m);
+        in.variation_deg = deg(fresh("navigation.magneticVariation"));
+        in.stw_ms   = fresh("navigation.speedThroughWater");
+        in.sog_ms   = fresh("navigation.speedOverGround");
+        in.cog_deg  = deg(fresh("navigation.courseOverGroundTrue"));
+        in.set_deg  = deg(fresh("environment.current.setTrue"));
+        in.drift_ms = fresh("environment.current.drift");
+        wind_display_update(screen_idx, &in);
+
+        // Bottom fields: empty path = TWS / TWA, otherwise the chosen path
+        const char* fpaths[2] = { screen_configs[screen_idx].quad_bl_path, screen_configs[screen_idx].quad_br_path };
+        for (int side = 0; side < 2; side++) {
+            String p = String(fpaths[side]);
+            if (p.length() == 0) { wind_display_update_field(screen_idx, side, 1, NAN, "", ""); continue; }
+            float v = get_fresh_value_by_path(p, WIND_STALE_MS);
+            String unit = get_sensor_unit_by_path(p);
+            String desc = get_sensor_description_by_path(p);
+            if (!isnan(v)) v = convert_unit(v, unit, p, unit);
+            if (desc.length() == 0) desc = p.substring(p.lastIndexOf('.') + 1);
+            wind_display_update_field(screen_idx, side, 0, v, unit.c_str(), desc.c_str());
+        }
         return;
     } else if (screen_configs[screen_idx].display_type == DISPLAY_TYPE_AIS) {
         // AIS radar display — fetch targets from Signal K REST API, then redraw
@@ -1656,6 +1745,7 @@ void loop() {
         g_full_brightness_request = false;
         brightness_set_full();
     }
+    power_key_loop();   // V4 on battery: hold the power button to switch off
     brightness_nvs_flush();
 
     // WS idle watchdog: resume WS automatically once the config page has been

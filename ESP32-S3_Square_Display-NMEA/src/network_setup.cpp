@@ -2,7 +2,9 @@
 
 #include "gauge_config.h"
 #include "version.h"
+#include "n2k_gateway.h"
 #include "ota_guard.h"
+#include "ota_check.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -372,7 +374,7 @@ static const N2kField n2k_all_fields[] = {
     N2K_WATER_DEPTH, N2K_DEPTH_BELOW_KEEL, N2K_DEPTH_OFFSET,
     // Wind
     N2K_WIND_SPEED_APPARENT, N2K_WIND_ANGLE_APPARENT,
-    N2K_WIND_SPEED_TRUE, N2K_WIND_ANGLE_TRUE,
+    N2K_WIND_SPEED_TRUE, N2K_WIND_ANGLE_TRUE, N2K_WIND_DIRECTION_TRUE, N2K_CURRENT_SET, N2K_CURRENT_DRIFT,
     // Environment
     N2K_TEMPERATURE, N2K_SEA_TEMPERATURE, N2K_TEMPERATURE_SET,
     N2K_OUTSIDE_TEMP, N2K_OUTSIDE_HUMIDITY,
@@ -1115,18 +1117,43 @@ void handle_gauges_page() {
     html += "  }\n";
     // Always switch the physical display, even when fragment is cached
     html += "  fetch('/gauges/switch?s='+idx).catch(function(){});\n";
+    html += "  parkTab();\n";
+    html += "  if(unparkTab(idx))return;\n";
     html += "  loadScreenFragment(idx,-1);\n";
     html += "}\n";
 
     // Fragment cache: key = "idx" for stored type, "idx_type" for type override.
     // Re-visiting the same tab is instant; first visit fetches from device.
     html += "var fragmentCache={};\n";
+    // Tabs already shown keep their live page content (with any edits, saved
+    // or not) while another tab is open, so coming back shows them as left.
+    html += "var tabNodes={};\n";
+    html += "function parkTab(){\n";
+    html += "  var cont=document.getElementById('screen-content');\n";
+    html += "  var t=cont.getAttribute('data-tab');\n";
+    html += "  if(t===null)return;\n";
+    html += "  var hold=document.createDocumentFragment();\n";
+    html += "  while(cont.firstChild)hold.appendChild(cont.firstChild);\n";
+    html += "  tabNodes[t]=hold;\n";
+    html += "  cont.removeAttribute('data-tab');\n";
+    html += "}\n";
+    html += "function unparkTab(idx){\n";
+    html += "  var hold=tabNodes[idx];\n";
+    html += "  if(!hold)return false;\n";
+    html += "  delete tabNodes[idx];\n";
+    html += "  var cont=document.getElementById('screen-content');\n";
+    html += "  cont.innerHTML='';\n";
+    html += "  cont.appendChild(hold);\n";
+    html += "  cont.setAttribute('data-tab',idx);\n";
+    html += "  return true;\n";
+    html += "}\n";
     html += "function loadScreenFragment(idx,typeOverride,retries){\n";
     html += "  retries=retries||0;\n";
     html += "  var cont=document.getElementById('screen-content');\n";
     html += "  var ckey=(typeOverride>=0)?(idx+'_'+typeOverride):String(idx);\n";
     html += "  if(fragmentCache[ckey]){\n";
     html += "    cont.innerHTML=fragmentCache[ckey];\n";
+    html += "    cont.setAttribute('data-tab',idx);\n";
     html += "    populateN2kSelects(cont);\n";  // re-populate dropdowns from cache hit
     html += "    return;\n";
     html += "  }\n";
@@ -1137,9 +1164,13 @@ void handle_gauges_page() {
     html += "    .then(function(r){return r.text();})\n";
     html += "    .then(function(h){\n";
     html += "      fragmentCache[ckey]=h;\n";
+    html += "      if(currentTab!==idx)return;\n";   // user has moved to another tab
     html += "      cont.innerHTML=h;\n";
+    html += "      cont.setAttribute('data-tab',idx);\n";
     html += "      populateN2kSelects(cont);\n";  // populate dropdowns on fresh load
-    html += "      preloadFragments(idx);\n";
+    // No background loading of the other tabs: each one costs ~10 KB of the
+    // internal RAM WiFi needs, and on busy Signal K setups it starved the
+    // connection. Tabs load when clicked.
     html += "    })\n";
     // Retry up to 3 times on network error (e.g. server still closing shell connection)
     html += "    .catch(function(e){\n";
@@ -1296,7 +1327,7 @@ void handle_gauges_screen() {
     int displayType = screen_configs[s].display_type;
     if (config_server.hasArg("type")) {
         int t = config_server.arg("type").toInt();
-        if (t >= 0 && t <= 10) displayType = t;
+        if (t >= 0 && t <= 11) displayType = t;
     }
 
     Serial.printf("[GAUGES] fragment s=%d type=%d iRAM=%u\n", s, displayType,
@@ -1322,8 +1353,8 @@ void handle_gauges_screen() {
 
     // Display Type dropdown
     html += "<div style='margin-bottom:16px;'><label>Display Type: <select name='displaytype_" + String(s) + "' id='displaytype_" + String(s) + "' onchange='toggleGaugeConfig(" + String(s) + ")'>";
-    const char* dtNames[] = {"Gauge","Number","Dual","Quad","Gauge + Number","Graph","Compass","Position","AIS","Attitude","Anchor Alarm"};
-    for (int dt = 0; dt < 11; ++dt) {
+    const char* dtNames[] = {"Gauge","Single Value","Dual Value","Quad Value","Gauge + Value","Graph","Compass","Position","AIS","Attitude","Anchor Alarm","Wind"};
+    for (int dt = 0; dt < 12; ++dt) {
         html += "<option value='" + String(dt) + "'";
         if (displayType == dt) html += " selected";
         html += ">" + String(dtNames[dt]) + "</option>";
@@ -1361,7 +1392,7 @@ void handle_gauges_screen() {
 
     // ── Number display config ────────────────────────────────────────
     if (displayType == DISPLAY_TYPE_NUMBER) {
-    html += "<h4>Number Display Settings</h4>";
+    html += "<h4>Single Value Settings</h4>";
     flushHtml();
     html += "<div style='margin-bottom:8px;'><label>NMEA 2000 Field: ";
     n2k_select(html, "number_path_" + String(s), screen_configs[s].number_path);
@@ -1431,9 +1462,36 @@ void handle_gauges_screen() {
     } // end displayType == DISPLAY_TYPE_COMPASS
     flushHtml();
 
+    // ── Wind config ──────────────────────────────────────────────────
+    if (displayType == DISPLAY_TYPE_WIND) {
+    html += "<h4>Wind Settings</h4>";
+    html += "<p style='color:#888;font-size:0.9em;margin:0 0 8px'>Apparent wind from PGN 130306. "
+            "True wind, wind direction and drift (PGN 130577) are used when your network sends them, otherwise worked out from boat speed, heading and GPS (shown with a <em>calc</em> tag). "
+            "Missing or out-of-date data shows --.</p>";
+    html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='wind_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
+    html += "<h4>Bottom Fields</h4><div style='display:flex;gap:16px;flex-wrap:wrap;'>";
+    {
+        const char* posName[2] = {"bl", "br"};
+        const char* title[2]   = {"Bottom-Left (None = TWS)", "Bottom-Right (None = TWD)"};
+        const char* paths[2]   = {screen_configs[s].quad_bl_path, screen_configs[s].quad_br_path};
+        const char* cols[2]    = {screen_configs[s].quad_bl_font_color, screen_configs[s].quad_br_font_color};
+        for (int f = 0; f < 2; f++) {
+            String pre = "wind_" + String(posName[f]) + "_";
+            html += "<div style='flex:1;min-width:200px;'><h5>" + String(title[f]) + "</h5>";
+            flushHtml();
+            html += "<div style='margin-bottom:4px;'><label>NMEA 2000 Field: ";
+            n2k_select(html, pre + "path_" + String(s), paths[f]);
+            html += "</label></div>";
+            html += "<div style='margin-bottom:4px;'><label>Font Color: <input name='" + pre + "font_color_" + String(s) + "' type='color' value='" + String(cols[f][0] ? cols[f] : "#FFFFFF") + "'></label></div></div>";
+        }
+    }
+    html += "</div>";
+    } // end displayType == DISPLAY_TYPE_WIND
+    flushHtml();
+
     // ── Dual display config ──────────────────────────────────────────
     if (displayType == DISPLAY_TYPE_DUAL) {
-    html += "<h4>Dual Display Settings</h4>";
+    html += "<h4>Dual Value Settings</h4>";
     html += "<div id='dual_bg_color_div_" + String(s) + "' style='margin-bottom:8px;display:" + String(isCustomColor ? "block" : "none") + ";'>";
     html += "<label>Background Color: <input name='dual_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
     // Top
@@ -1500,7 +1558,7 @@ void handle_gauges_screen() {
 
     // ── Quad display config ──────────────────────────────────────────
     if (displayType == DISPLAY_TYPE_QUAD) {
-    html += "<h4>Quad Display Settings</h4>";
+    html += "<h4>Quad Value Settings</h4>";
     html += "<div style='margin-bottom:8px;'><label>Background Color: <input name='quad_bg_color_" + String(s) + "' type='color' value='" + String(screen_configs[s].number_bg_color[0] ? screen_configs[s].number_bg_color : "#000000") + "'></label></div>";
     // Quad quadrant helper
     auto addQuadrantHTML = [&](const char* name, const char* label, char* path, uint8_t size, char* color, int g_alm, int zl, int zh, int lslot) {
@@ -1631,7 +1689,7 @@ void handle_gauges_screen() {
 
     // ── Gauge + Number config ────────────────────────────────────────
     if (displayType == DISPLAY_TYPE_GAUGE_NUMBER) {
-    html += "<h4>Center Number Display</h4>";
+    html += "<h4>Centre Value</h4>";
     flushHtml();
     html += "<div style='margin-bottom:8px;'><label>NMEA 2000 Field: ";
     n2k_select(html, "gauge_num_center_path_" + String(s), screen_configs[s].gauge_num_center_path);
@@ -2028,6 +2086,24 @@ void handle_save_gauges() {
                         saveCompassField("br", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_size, screen_configs[s].quad_br_font_color);
                     }
                     
+                    // Save wind screen settings — only for WIND screens (shares quad_bl/br fields with Compass)
+                    if (screen_configs[s].display_type == DISPLAY_TYPE_WIND) {
+                        String bgk = "wind_bg_color_" + String(s);
+                        if (config_server.hasArg(bgk)) {
+                            strncpy(screen_configs[s].number_bg_color, config_server.arg(bgk).c_str(), 7);
+                            screen_configs[s].number_bg_color[7] = '\0';
+                        }
+                        // No font size: the bottom fields only fit the small font
+                        auto saveWindField = [&](const char* pos, char* path, char* color) {
+                            String pk = "wind_" + String(pos) + "_path_" + String(s);
+                            if (config_server.hasArg(pk)) { String v = config_server.arg(pk); v.trim(); strncpy(path, v.c_str(), 127); path[127] = '\0'; }
+                            String ck = "wind_" + String(pos) + "_font_color_" + String(s);
+                            if (config_server.hasArg(ck)) { strncpy(color, config_server.arg(ck).c_str(), 7); color[7] = '\0'; }
+                        };
+                        saveWindField("bl", screen_configs[s].quad_bl_path, screen_configs[s].quad_bl_font_color);
+                        saveWindField("br", screen_configs[s].quad_br_path, screen_configs[s].quad_br_font_color);
+                    }
+
                     // Save quad display settings (TL, TR, BL, BR)
                     auto saveQuadrant = [&](const char* name, char* path, uint8_t& size, char* color) {
                         String pathKey = "quad_" + String(name) + "_path_" + String(s);
@@ -2519,6 +2595,32 @@ static String rssi_bar(int rssi) {
          + "<span style='display:inline-block;width:" + String(pct) + "%;background:" + color + ";height:100%;border-radius:3px'></span></span>";
 }
 
+static String html_attr_escape(const String& in) {
+    String out;
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        if (c == '&') out += "&amp;";
+        else if (c == '\'') out += "&#39;";
+        else if (c == '"') out += "&quot;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else out += c;
+    }
+    return out;
+}
+
+static String json_escape(const String& in) {
+    String out;
+    for (size_t i = 0; i < in.length(); i++) {
+        char c = in[i];
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if ((uint8_t)c < 0x20) out += ' ';
+        else out += c;
+    }
+    return out;
+}
+
+
 void handle_network_page() {
     String html = "<html><head>";
     html += STYLE;
@@ -2549,15 +2651,42 @@ void handle_network_page() {
     html += "<div id='scanResults' style='margin:0 0 10px 148px;display:none'></div>";
     html += "<div class='form-row'><label>Password:</label><input name='password' type='password' value='" + saved_password + "'></div>";
 
-    html += "<div class='form-row'><label>NMEA 2000:</label><span id='n2kstat' style='color:#888'>checking...</span></div>";
-
     html += "<div class='form-row'><label>ESP32 Hostname:</label><input name='hostname' type='text' value='" + saved_hostname + "'></div>";
 
     html += "<div class='form-row'><label>WiFi wait (s):</label><input name='wifi_wait' type='number' min='15' max='300' step='1' value='" + String(wifi_wait_sec) + "'></div>";
 
     html += "<div class='form-row'><label></label><small style='color:#666'>How long to look for your WiFi at start-up before switching to the setup hotspot. Default 15. Increase it (e.g. 90) if your router takes longer to start than the display. While it's looking, the screen doesn't update or respond to touch, so a longer wait means a longer frozen screen when the WiFi isn't there (or the password is wrong).</small></div>";
-    html += "<div style='text-align:center;margin-top:12px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
+
+    // NMEA 2000 data source: CAN port or WiFi gateway. Same form as the WiFi
+    // settings above, so one Save & Reboot saves everything on this page.
+    {
+        const N2kGwSettings& gw = n2k_gw_settings();
+        auto sel = [](bool on) { return on ? String(" selected") : String(""); };
+        html += "<h3 style='margin-top:22px;'>NMEA 2000 data source</h3>";
+        html += "<div class='form-row'><label>Status:</label><span id='n2kstat' style='color:#888'>checking...</span></div>";
+        html += "<div class='form-row'><label>Source:</label><select name='src' id='n2ksrc' onchange='n2kSrcChanged()'>"
+                "<option value='can'" + sel(!gw.use_wifi) + ">CAN port (wired to the NMEA 2000 bus)</option>"
+                "<option value='wifi'" + sel(gw.use_wifi) + ">WiFi gateway</option></select></div>";
+        html += "<div id='n2kgw' style='display:" + String(gw.use_wifi ? "block" : "none") + "'>";
+        html += "<div class='form-row'><label>Gateway format:</label><select name='fmt'>";
+        for (uint8_t f = N2KGW_FMT_YDRAW; f <= N2KGW_FMT_SEASMART; f++) {
+            html += "<option value='" + String(f) + "'" + sel(gw.format == f) + ">" + n2k_gw_format_name(f) + "</option>";
+        }
+        html += "</select></div>";
+        html += "<div class='form-row'><label>Connection:</label><select name='proto' id='n2kproto' onchange='n2kSrcChanged()'>"
+                "<option value='tcp'" + sel(!gw.udp) + ">TCP (display connects to the gateway)</option>"
+                "<option value='udp'" + sel(gw.udp) + ">UDP (gateway sends to the display)</option></select></div>";
+        html += "<div class='form-row' id='n2khostrow'><label>Gateway IP address:</label><input name='host' type='text' value='" + html_attr_escape(gw.host) + "' placeholder='e.g. 192.168.4.1'></div>";
+        html += "<div class='form-row'><label>Port:</label><input name='port' type='number' min='1' max='65535' value='" + (gw.port ? String(gw.port) : String("")) + "'></div>";
+        html += "<p style='color:#888;font-size:0.85em;margin:4px 0 0'>Use the data format, port and protocol set up on your gateway's own settings page. "
+                "The display only receives data and never sends anything to the gateway or the NMEA 2000 bus. "
+                "The display must be on the same WiFi network as the gateway: either your boat's router, or the gateway's own WiFi hotspot "
+                "if it has one. Set the WiFi at the top of this page to that network.</p>";
+        html += "</div>";
+    }
+    html += "<div style='text-align:center;margin-top:16px;'><button class='tab-btn' type='submit' style='padding:10px 18px;'>Save & Reboot</button></div>";
     html += "</form>";
+
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
 
     // JavaScript for WiFi scanning — two-phase: kick /scan-wifi then poll /scan-wifi-results
@@ -2604,17 +2733,26 @@ void handle_network_page() {
             "function pollN2k(){"
               "fetch('/n2k-stats').then(function(r){return r.json();}).then(function(d){"
                 "var el=document.getElementById('n2kstat');"
+                "var via=d.src==='wifi'?' via WiFi gateway':'';"
                 "if(d.pgns>0){"
                   "el.style.color='#4a4';el.style.fontWeight='bold';"
-                  "el.textContent='Active (' + d.pgns + ' PGNs received)';"
+                  "el.textContent='Active' + via + ' (' + d.pgns + ' PGNs received)';"
                 "}else{"
                   "el.style.color='#c80';el.style.fontWeight='normal';"
-                  "el.textContent='No data (bus connected?)';"
+                  "el.textContent=d.src==='wifi'?'No data yet':'No data (bus connected?)';"
+                "}"
+                "if(d.src==='wifi'){"
+                  "el.textContent+=' - ' + d.gw + (d.bad>0?' (' + d.bad + ' unreadable lines: check the format)':'');"
                 "}"
               "}).catch(function(){});"
               "setTimeout(pollN2k,2000);"
             "}"
             "pollN2k();"
+            "function n2kSrcChanged(){"
+              "document.getElementById('n2kgw').style.display=document.getElementById('n2ksrc').value==='wifi'?'block':'none';"
+              "document.getElementById('n2khostrow').style.display=document.getElementById('n2kproto').value==='tcp'?'':'none';"
+            "}"
+            "n2kSrcChanged();"
             "</script>";
 
     html += "</div></div></body></html>";
@@ -2622,8 +2760,36 @@ void handle_network_page() {
 }
 
 
+// Reads the NMEA 2000 data source fields posted with the Network form.
+// Returns false (with a message) if the WiFi gateway settings are incomplete.
+static bool read_n2k_source_args(N2kGwSettings& gw, String& problem) {
+    gw.use_wifi = config_server.arg("src") == "wifi";
+    gw.format = (uint8_t)constrain(config_server.arg("fmt").toInt(), N2KGW_FMT_YDRAW, N2KGW_FMT_SEASMART);
+    gw.udp = config_server.arg("proto") == "udp";
+    gw.host = config_server.arg("host");
+    gw.host.trim();
+    long port = config_server.arg("port").toInt();
+    gw.port = (port >= 1 && port <= 65535) ? (uint16_t)port : 0;
+
+    if (gw.use_wifi && gw.port == 0) problem = "Please enter the gateway's port (1-65535).";
+    else if (gw.use_wifi && !gw.udp && gw.host.length() == 0) problem = "Please enter the gateway's IP address.";
+    return problem.length() == 0;
+}
+
 void handle_save_wifi() {
     if (config_server.method() == HTTP_POST) {
+        // Check the NMEA 2000 data source first so nothing is saved if it's incomplete.
+        N2kGwSettings gw;
+        String problem;
+        bool has_src = config_server.hasArg("src");
+        if (has_src && !read_n2k_source_args(gw, problem)) {
+            String html = "<html><head>";
+            html += STYLE;
+            html += "<title>Not saved</title></head><body><div class='container'>";
+            html += "<h2>Not saved</h2><p>" + problem + "</p><p><a href='/network'>Back</a></p></div></body></html>";
+            config_server.send(400, "text/html", html);
+            return;
+        }
         saved_ssid = config_server.arg("ssid");
         saved_password = config_server.arg("password");
         saved_signalk_ip = config_server.arg("signalk_ip");
@@ -2636,6 +2802,11 @@ void handle_save_wifi() {
             wifi_wait_sec = (uint16_t)w;
         }
         save_preferences();
+        if (has_src) {
+            n2k_gw_save(gw);
+            Serial.printf("[N2K-WiFi] Saved: source=%s fmt=%u %s %s:%u\n", gw.use_wifi ? "wifi" : "can",
+                          gw.format, gw.udp ? "UDP" : "TCP", gw.host.c_str(), gw.port);
+        }
         Serial.println("[WiFi Config] SSID: " + saved_ssid);
         Serial.println("[WiFi Config] SignalK IP: " + saved_signalk_ip);
         Serial.printf("[WiFi Config] SignalK Port: %u\n", saved_signalk_port);
@@ -2652,6 +2823,8 @@ void handle_save_wifi() {
         config_server.send(405, "text/plain", "Method Not Allowed");
     }
 }
+
+bool Touch_Present(void);  // Touch_GT911.cpp
 
 void handle_device_page() {
     String html = "<html><head>";
@@ -2673,6 +2846,10 @@ void handle_device_page() {
     html += "<option value='60'" + String(buzzer_cooldown_sec==60?" selected":"") + ">60s pause</option>";
     html += "</select></div>";
     // Auto-scroll (dropdown matching screen options)
+    if (!Touch_Present()) {
+        html += "<p style='background:#fff3e0;border:1px solid #ffcc80;border-radius:6px;padding:8px 10px'>"
+                "<b>No touch screen detected.</b> Use Auto-scroll to move between screens, and set brightness on this page.</p>";
+    }
     html += "<div class='form-row'><label>Auto-scroll:</label><select name='auto_scroll'>";
     html += "<option value='0'" + String(auto_scroll_sec==0?" selected":"") + ">Off</option>";
     html += "<option value='5'" + String(auto_scroll_sec==5?" selected":"") + ">5s</option>";
@@ -2829,17 +3006,41 @@ void handle_needles_page() {
     html += "<div class='tab-content'>";
     html += "<h2>Needle Styles</h2>";
     html += "<form method='POST' action='/save-needles'>";
-    // Screen/gauge selectors
-    html += "<div class='form-row'><label>Screen:</label><select name='screen'>";
+    // Screen/gauge selectors. Changing either reloads the page so the fields
+    // show that needle's settings (otherwise Save would copy the old values).
+    static const char* const dtNames[] = {"Gauge","Single Value","Dual Value","Quad Value","Gauge + Value","Graph","Compass","Position","AIS","Attitude","Anchor Alarm","Wind"};
+    const int dtCount = sizeof(dtNames) / sizeof(dtNames[0]);
+    auto typeName = [&](int s) -> String {
+        int t = screen_configs[s].display_type;
+        return (t >= 0 && t < dtCount) ? String(dtNames[t]) : String("Unknown");
+    };
+    const char* reload = " onchange=\"location='/needles?screen='+this.form.screen.value+'&gauge='+this.form.gauge.value\"";
+    html += "<div class='form-row'><label>Screen:</label><select name='screen'" + String(reload) + ">";
     for (int i = 0; i < NUM_SCREENS; ++i) {
         // keep option value 0-based for backend, show 1-based to user
-        html += "<option value='" + String(i) + "'" + String(i==screen?" selected":"") + ">" + String(i+1) + "</option>";
+        html += "<option value='" + String(i) + "'" + String(i==screen?" selected":"") + ">" + String(i+1) + " - " + typeName(i) + "</option>";
     }
     html += "</select></div>";
-    html += "<div class='form-row'><label>Gauge:</label><select name='gauge'>";
+    html += "<div class='form-row'><label>Gauge:</label><select name='gauge'" + String(reload) + ">";
     html += "<option value='0'" + String(gauge==0?" selected":"") + ">Top</option>";
     html += "<option value='1'" + String(gauge==1?" selected":"") + ">Bottom</option>";
     html += "</select></div>";
+    // Say when this needle isn't shown, so changes here don't seem to do nothing
+    {
+        int t = screen_configs[screen].display_type;
+        String n = String(screen + 1);
+        String note;
+        if (t == DISPLAY_TYPE_GAUGE_NUMBER && gauge == 1)
+            note = "Screen " + n + " is a Gauge + Value screen, which has only the top needle.";
+        else if (t == DISPLAY_TYPE_GAUGE && gauge == 1 && !screen_configs[screen].show_bottom)
+            note = "The bottom gauge is switched off on screen " + n + ", so this needle isn't shown.";
+        else if (t != DISPLAY_TYPE_GAUGE && t != DISPLAY_TYPE_GAUGE_NUMBER)
+            note = "Screen " + n + " is a " + typeName(screen) + " screen, which doesn't use gauge needles.";
+        if (note.length()) {
+            html += "<p style='background:#fff3e0;color:#333;border:1px solid #ffcc80;border-radius:6px;padding:8px 10px;margin:8px 0;'>"
+                    + note + " Settings saved here are kept and used if the screen is changed to a gauge.</p>";
+        }
+    }
     // Color
     html += "<div class='form-row'><label>Color:</label><input name='color' type='color' value='" + s.color + "'></div>";
     // Width
@@ -2859,6 +3060,9 @@ void handle_needles_page() {
     html += "<p style='text-align:center; margin-top:10px;'><a href='/'>Back</a></p>";
     html += "</div></div></body></html>";
     config_server.send(200, "text/html", html);
+    // Show the screen whose needle is being edited (after the reply is sent,
+    // as switching screens while sending raced LVGL DMA with TCP buffers)
+    ui_set_screen(screen + 1);   // 1-based
 }
 
 void handle_save_needles() {
@@ -2903,9 +3107,9 @@ void setup_network() {
     Serial.begin(115200);
     delay(100);
     Serial.printf("Flash size (ESP.getFlashChipSize()): %u bytes\n", ESP.getFlashChipSize());
-    if (!SPIFFS.begin(true)) {
-        Serial.println("[ERROR] SPIFFS Mount Failed");
-    }
+    // SPIFFS is not used by this firmware. It used to be mounted here with
+    // format-on-fail, which after a full erase spent ~35 s formatting the
+    // empty partition on first boot, with the display stuck.
     // Note: Do not load preferences here; caller should load before UI init when required.
     // WiFi connect or AP fallback
     WiFi.mode(WIFI_STA);
@@ -2938,7 +3142,7 @@ void setup_network() {
     if (WiFi.status() == WL_CONNECTED) {
         // Disable power-save so the radio stays awake between loop() calls.
         WiFi.setSleep(false);
-        Serial.println("\nWiFi connected!");
+        Serial.printf("\nWiFi connected! Signal %d dBm (-50 good, -70 weak, -80 poor)\n", (int)WiFi.RSSI());
         Serial.print("IP: ");
         Serial.println(WiFi.localIP());
         // Start mDNS responder so device can be reached by hostname.local
@@ -3001,8 +3205,15 @@ void setup_network() {
     config_server.on("/scan-wifi", HTTP_GET, handle_scan_wifi);
     config_server.on("/scan-wifi-results", HTTP_GET, handle_scan_wifi_results);
     config_server.on("/n2k-stats", HTTP_GET, []() {
-        config_server.send(200, "application/json",
-            "{\"pgns\":" + String(get_n2k_msg_count()) + "}");
+        String json = "{\"pgns\":" + String(get_n2k_msg_count());
+        if (n2k_gw_enabled()) {
+            json += ",\"src\":\"wifi\",\"gw\":\"" + json_escape(n2k_gw_status()) + "\"";
+            json += ",\"bad\":" + String(n2k_gw_bad_lines());
+        } else {
+            json += ",\"src\":\"can\"";
+        }
+        json += "}";
+        config_server.send(200, "application/json", json);
     });
     config_server.on("/device", handle_device_page);
     config_server.on("/save-device", HTTP_POST, handle_save_device);
@@ -3563,6 +3774,8 @@ void handle_ota_page() {
     html += "<title>OTA Firmware Update</title></head><body><div class='container'>";
     html += "<h2>Firmware Update</h2>";
     html += "<p style='font-size:0.85em;color:#888'>" + String(info) + "</p>";
+    html += ota_check_html("square-nmea", FW_VERSION);
+    html += "<h3>Or upload a file</h3>";
     html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
     html += "<p>Select the <b>update file</b> for this display, named <code>ota-marine-display-....bin</code>, "
             "from the <a href='https://github.com/Boatingwiththebaileys/Marine-Displays/releases' target='_blank'>GitHub releases</a>. "

@@ -14,6 +14,7 @@ void compass_display_create(int screen_num);
 // Update the compass display with a new heading in degrees (0-359.9).
 // heading_true: 1 = True heading (°T label), 0 = Magnetic (°M label)
 void compass_display_update(int screen_num, float heading_deg, int heading_true);
+void compass_display_no_heading(int screen_num);
 
 // Update the bottom-left / bottom-right extra data fields.
 // value: NaN shows "---"; unit/description may be NULL or empty.

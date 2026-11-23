@@ -785,6 +785,8 @@ extern "C" void update_needles_for_screen(int screen_num) {
             float hdg_deg = convert_angle_rad(hdg_rad);
             bool is_true = (hdg_path.indexOf("True") >= 0 || hdg_path.indexOf("true") >= 0);
             compass_display_update(screen_idx, hdg_deg, is_true ? 1 : 0);
+        } else {
+            compass_display_no_heading(screen_idx);
         }
         // BL / BR extra data fields
         auto compass_get_field = [](const String& path, float& val, String& unit, String& desc) {

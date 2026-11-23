@@ -280,8 +280,16 @@ void compass_display_create(int n) {
     lv_obj_align(c_br_unit[n], LV_ALIGN_TOP_LEFT, 375, 450);
     lv_obj_add_flag(c_br_unit[n], LV_OBJ_FLAG_IGNORE_LAYOUT);
 
-    // Draw initial position (heading = 0)
+    // Draw initial position (heading = 0), then show "no data" until a heading arrives
     compass_display_update(n, 0.0f, 0);
+    compass_display_no_heading(n);
+}
+
+// No heading data (missing, null or out of date): show dashes, leave the tape where it is
+void compass_display_no_heading(int n) {
+    if (n < 0 || n >= NUM_SCREENS) return;
+    if (c_hdg_lbl[n]) lv_label_set_text(c_hdg_lbl[n], "---\xc2\xb0");
+    if (c_card_lbl[n]) lv_label_set_text(c_card_lbl[n], "---");
 }
 
 void compass_display_update(int n, float heading_deg, int heading_true) {

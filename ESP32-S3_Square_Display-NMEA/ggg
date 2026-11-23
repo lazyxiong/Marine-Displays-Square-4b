@@ -1,0 +1,17 @@
+We flashed `waveshare_4inch_4b` to the ESP32-S3-Touch-LCD-4B and captured the serial boot log. It crashes in a watchdog loop (`rst:0x8 (TG1WDT_SYS_RST)`) right after `ST7701_Reset`:
+
+AXP2101 (0x34) rails enabled: DCDC(0x80)=0x1F LDO0(0x90)=0xFF LDO1(0x91)=0x01
+PCF85063 is running,state :1
+RTC (PCF85063) initialized
+Shared SPI bus initialized
+SD: silencing SD (EXIO_PIN4 HIGH) before display init
+Parameter error, please enter the correct parameter!
+[DISPLAY] ST7701_Reset: v3 board (expander 0x20), toggling EXIO_PIN3
+[DISPLAY] ST7701_Reset: v3 done
+rst:0x8 (TG1WDT_SYS_RST),boot:0x28 (SPI_FAST_FLASH_BOOT)
+
+
+Fix these exact issues by comparing our code against `/tmp/ESP32-S3-Touch-LCD-4B`:
+1. Find where `"Parameter error, please enter the correct parameter!"` comes from (likely `TCA9554PWR` `Set_EXIO`/`Mode_EXIO` receiving a pin number out of 1..8 or 0..7 bounds, or a v3 `EXIO_PIN4` macro mismatch) and fix all `BOARD_WAVESHARE_4B` expander pin calls to match `/tmp/ESP32-S3-Touch-LCD-4B`.
+2. Trace the code immediately after `[DISPLAY] ST7701_Reset: v3 done` (likely `ST7701_Init()` 3-wire SPI bit-banging or `esp_lcd_new_rgb_panel()` / `LCD_Init()`). Compare every single GPIO (`LCD_CS`, `LCD_SCK`, `LCD_MOSI`, `DE`, `VSYNC`, `HSYNC`, `PCLK`, `R0..R4`, `G0..G5`, `B0..B4`, and backlight) against `/tmp/ESP32-S3-Touch-LCD-4B`—a wrong pin (such as driving a flash/PSRAM SPI pin like GPIO 26–37) causes `TG1WDT_SYS_RST` on ESP32-S3.
+3. Verify that `BOARD_WAVESHARE_4B` does not fall through into any `v3` (`CH422G`) pin definitions, and recompile with `pio run -e waveshare_4inch_4b`.

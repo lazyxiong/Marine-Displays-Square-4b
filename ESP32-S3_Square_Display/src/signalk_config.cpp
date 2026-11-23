@@ -574,7 +574,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                         continue;
                     }
 
-                    float value = val["value"].as<float>();
+                    float value = val["value"].isNull() ? NAN : val["value"].as<float>();
                     note_rx_time(String(path));
 
                     // Check if this path matches any gauge path

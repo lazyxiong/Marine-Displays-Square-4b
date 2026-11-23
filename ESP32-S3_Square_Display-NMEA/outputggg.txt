@@ -1,4 +1,0 @@
-src/Display_ST7701.h:24:#define LCD_Backlight_PIN   -1 // Use expander BL_EN (EXIO_PIN2) only; MCU PWM disabled
-src/Display_ST7701.h:26:#define LCD_CS_PIN 42
-src/Display_ST7701.h:79:extern uint8_t LCD_Backlight;
-src/Display_ST7701.h:85:#define USE_SWSPI_VENDOR_INIT 0

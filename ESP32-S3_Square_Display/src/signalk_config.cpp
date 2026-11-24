@@ -136,6 +136,12 @@ static const unsigned long RECONNECT_MAX_MS = 60000;
 static const unsigned long MESSAGE_TIMEOUT_MS = 30000; // 30s without messages => reconnect (ping is every 15s, so 30s means 2 missed pongs)
 static const unsigned long PING_INTERVAL_MS = 15000; // send periodic ping
 
+// Ask the server for at most one update per path (per source) every 500 ms.
+// "period":0 meant "send every change" - on a busy NMEA 2000 network that is
+// more than the display can process, so data queued up and the display lagged
+// far behind (seen on wind). The server sends the latest value of each window.
+#define SK_SUB_PERIOD_MS_STR "500"
+
 // Forward declaration for active-screen path collection
 static std::vector<String> get_active_screen_paths(int screen_1based);
 
@@ -495,7 +501,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
                 if (!first_conn) out += ",";
                 out += "{\"path\":\"";
                 out += p;
-                out += "\",\"period\":0}";
+                out += "\",\"period\":" SK_SUB_PERIOD_MS_STR "}";
                 first_conn = false;
             }
         }
@@ -849,7 +855,7 @@ void subscribe_to_active_screen(int screen_1based) {
         if (!first) out += ",";
         out += "{\"path\":\"";
         out += p;
-        out += "\",\"period\":0}";
+        out += "\",\"period\":" SK_SUB_PERIOD_MS_STR "}";
         first = false;
     }
     out += "]}";
@@ -886,7 +892,7 @@ void refresh_signalk_subscriptions() {
             if (!first) out += ",";
             out += "{\"path\":\"";
             out += path;
-            out += "\",\"period\":0}";
+            out += "\",\"period\":" SK_SUB_PERIOD_MS_STR "}";
             first = false;
         }
     }
